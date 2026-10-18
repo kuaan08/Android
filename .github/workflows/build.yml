@@ -36,7 +36,7 @@ jobs:
           g++ -std=c++20 -O1 -g -Wall -Wextra -Wpedantic \
             -fsanitize=address,undefined -fno-omit-frame-pointer \
             native/src/loader/iso_parser.cpp native/src/loader/xex_loader.cpp \
-            tests/iso_xex_pipeline_smoke.cpp -o /tmp/iso_xex_pipeline_smoke
+            native/src/loader/aes128.cpp tests/iso_xex_pipeline_smoke.cpp -o /tmp/iso_xex_pipeline_smoke
           /tmp/iso_xex_pipeline_smoke
 
   xex2-loader:
@@ -47,9 +47,23 @@ jobs:
       - name: Compile and run XEX2 reader unit fixtures
         run: |
           g++ -std=c++20 -O1 -g -Wall -Wextra -Wpedantic \
-            native/src/loader/xex_loader.cpp tests/xex_loader_smoke.cpp \
+            native/src/loader/xex_loader.cpp native/src/loader/aes128.cpp \
+            tests/xex_loader_smoke.cpp \
             -o /tmp/xex_loader_smoke
           /tmp/xex_loader_smoke
+
+  aes-xex2:
+    name: AES-128 NIST vectors and retail XEX2 decryption (ASan/UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test AES ECB/CBC and encrypted synthetic XEX2 fixtures
+        run: |
+          g++ -std=c++20 -O1 -g -Wall -Wextra -Wpedantic \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            native/src/loader/xex_loader.cpp native/src/loader/aes128.cpp \
+            tests/aes_xex2_smoke.cpp -o /tmp/aes_xex2_smoke
+          /tmp/aes_xex2_smoke
 
   android:
     name: Android ARM64 Flutter and native JIT APK
