@@ -35,20 +35,22 @@ GpuLayer::~GpuLayer() {
 }
 
 bool GpuLayer::init(ANativeWindow* window, uint8_t* guestMemory, uint64_t guestBase) {
+    m_rendererStatus.store(1);
     m_window      = window;
     m_guestMemory = guestMemory;
     m_guestBase   = guestBase;
 
-    if (!createInstance())       { LOGE("createInstance failed");      return false; }
-    if (!selectPhysicalDevice()) { LOGE("selectPhysicalDevice failed");return false; }
-    if (!createLogicalDevice())  { LOGE("createLogicalDevice failed"); return false; }
-    if (!createSwapchain(window)){ LOGE("createSwapchain failed");     return false; }
-    if (!createRenderPass())     { LOGE("createRenderPass failed");    return false; }
-    if (!createFramebuffers())   { LOGE("createFramebuffers failed");  return false; }
-    if (!createCommandPool())    { LOGE("createCommandPool failed");   return false; }
-    if (!createSyncObjects())    { LOGE("createSyncObjects failed");   return false; }
+    if (!createInstance()) { LOGE("createInstance failed"); m_rendererStatus.store(3); return false; }
+    if (!selectPhysicalDevice()) { LOGE("selectPhysicalDevice failed"); m_rendererStatus.store(3); return false; }
+    if (!createLogicalDevice()) { LOGE("createLogicalDevice failed"); m_rendererStatus.store(3); return false; }
+    if (!createSwapchain(window)) { LOGE("createSwapchain failed"); m_rendererStatus.store(3); return false; }
+    if (!createRenderPass()) { LOGE("createRenderPass failed"); m_rendererStatus.store(3); return false; }
+    if (!createFramebuffers()) { LOGE("createFramebuffers failed"); m_rendererStatus.store(3); return false; }
+    if (!createCommandPool()) { LOGE("createCommandPool failed"); m_rendererStatus.store(3); return false; }
+    if (!createSyncObjects()) { LOGE("createSyncObjects failed"); m_rendererStatus.store(3); return false; }
 
     m_initialized = true;
+    m_rendererStatus.store(2);
     LOGI("Vulkan renderer initialized (%ux%u)", m_swapExtent.width, m_swapExtent.height);
     return true;
 }
@@ -90,6 +92,10 @@ bool GpuLayer::selectPhysicalDevice() {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(dev, &props);
         LOGI("GPU: %s", props.deviceName);
+        {
+            std::lock_guard<std::mutex> guard(m_gpuNameMutex);
+            m_gpuName = props.deviceName;
+        }
         m_physDevice = dev; // Take the first (usually only one on Android)
         break;
     }
@@ -346,7 +352,13 @@ void GpuLayer::presentFrame() {
     present.swapchainCount     = 1;
     present.pSwapchains        = &m_swapchain;
     present.pImageIndices      = &imgIdx;
-    vkQueuePresentKHR(m_graphicsQueue, &present);
+    const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &present);
+    if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR) {
+        m_presentedFrames.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        LOGE("vkQueuePresentKHR failed: %d", static_cast<int>(presentResult));
+        return;
+    }
 
     // FPS tracking
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
