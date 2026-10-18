@@ -412,7 +412,10 @@ def main(argv=None) -> int:
     android.add_argument("--ndk", type=Path)
     android.add_argument("--android-sdk", type=Path)
     android.add_argument("--jobs", type=int, default=2)
-    android.add_argument("--runtime", action="store_true")
+    android_mode = android.add_mutually_exclusive_group()
+    android_mode.add_argument("--runtime", action="store_true", help="Compile a prepared title into a native ARM64 APK")
+    android_mode.add_argument("--ondevice-codegen", action="store_true",
+                              help="Include experimental on-device C++ code generation in the launcher")
     setup_android = commands.add_parser("setup-android", help="Install pinned Android tools after explicit consent")
     setup_android.add_argument("--yes", action="store_true", required=True)
     prepare_cmd = commands.add_parser("prepare", help="Initialize a project without codegen")
@@ -473,8 +476,9 @@ def main(argv=None) -> int:
                 print(f"Done: {target}", flush=True)
         elif args.command == "android":
             import android_build
-            android_build.export(args.project, args.sdk_source, args.ndk, args.android_sdk,
-                                 args.runtime, args.jobs)
+            android_build.export(project=args.project, source=args.sdk_source, ndk=args.ndk,
+                                 sdk=args.android_sdk, runtime=args.runtime,
+                                 ondevice_codegen=args.ondevice_codegen, jobs=args.jobs)
         elif args.command == "suggest-hints":
             from analysis_hints import suggest_hints
             print(json.dumps(suggest_hints(args.project), indent=2))
