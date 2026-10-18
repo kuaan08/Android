@@ -26,6 +26,18 @@ jobs:
             -o /tmp/iso_parser_smoke
           /tmp/iso_parser_smoke
 
+  xex2-loader:
+    name: Native XEX2 loader (synthetic security and optional headers)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run XEX2 reader unit fixtures
+        run: |
+          g++ -std=c++20 -O1 -g -Wall -Wextra -Wpedantic \
+            native/src/loader/xex_loader.cpp tests/xex_loader_smoke.cpp \
+            -o /tmp/xex_loader_smoke
+          /tmp/xex_loader_smoke
+
   android:
     name: Android ARM64 Flutter and native JIT APK
     runs-on: ubuntu-24.04
