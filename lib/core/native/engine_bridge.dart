@@ -1,6 +1,7 @@
 import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/game_entry.dart';
@@ -32,6 +33,8 @@ class EngineBridge {
   static EngineBridge? _instance;
   static late DynamicLibrary _lib;
   static bool _initialized = false;
+  static String? _initializationError;
+  static String? get initializationError => _initializationError;
 
   /// Singleton accessor.
   static EngineBridge get instance {
@@ -42,6 +45,7 @@ class EngineBridge {
 
   // ─── Native function pointers ─────────────────────────────────────────────
   static late int Function(int logLevel) _engineInit;
+  static late void Function(Pointer<Utf8> game, Pointer<Utf8> save) _setDirectories;
   static late void Function() _engineShutdown;
   static late int Function(Pointer<Utf8> path, Pointer<Utf8> outTitleId, int outLen) _xexLoad;
   static late int Function(Pointer<Utf8> path, Pointer<Utf8> outTitleId, int outLen) _stfsLoad;
@@ -57,7 +61,7 @@ class EngineBridge {
   static late double Function() _metricsGetFps;
   static late double Function() _metricsGetFrameTime;
   static late int Function() _metricsGetRamUsage;
-  static late double Function() _metricsGetCpuUsage;
+  // CPU usage is not exported by this runtime. Do not bind an imaginary symbol.
   static late double Function() _metricsGetGpuTemp;
   static late int Function() _metricsGetJitBlocks;
   static late void Function(int width, int height) _settingsSetResolution;
@@ -74,27 +78,51 @@ class EngineBridge {
   int _lt = 0, _rt = 0;
 
   // ─── Initialization ───────────────────────────────────────────────────────
-  static Future<void> initialize() async {
+  /// Initialize once, with filesystem paths that the native HLE can access.
+  /// Importing an ISO alone never triggers this 4 GiB *virtual* reservation.
+  static Future<void> initialize({String? gameDirectory}) async {
     if (_initialized) return;
+    _initializationError = null;
     _instance = EngineBridge._();
-    if (Platform.isAndroid) {
+    if (!Platform.isAndroid) {
+      _initializationError = 'Native ARM64 runtime requires Android.';
+      return;
+    }
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final saveDir = Directory('${appDir.path}/saves');
+      await saveDir.create(recursive: true);
+      final gameDir = Directory(gameDirectory ?? '${appDir.path}/games');
+      await gameDir.create(recursive: true);
+      _lib = DynamicLibrary.open('libxbox360recomp.so');
+      _bindFunctions();
+      final gamePtr = gameDir.path.toNativeUtf8();
+      final savePtr = saveDir.path.toNativeUtf8();
       try {
-        _lib = DynamicLibrary.open('libxbox360recomp.so');
-        _bindFunctions();
-        _engineInit(1);
-        _initialized = true;
-        debugPrint('[EngineBridge] Native engine loaded');
-      } catch (e) {
-        debugPrint('[EngineBridge] Stub mode: $e');
+        _setDirectories(gamePtr, savePtr);
+      } finally {
+        calloc.free(gamePtr);
+        calloc.free(savePtr);
       }
-    } else {
-      debugPrint('[EngineBridge] Non-Android — stub mode');
+      final result = _engineInit(1);
+      if (result != 0) {
+        throw StateError('Native x360_engine_init returned $result '
+            '(possibly guest address-space or HLE initialization failure).');
+      }
+      _initialized = true;
+      debugPrint('[EngineBridge] Native ARM64 engine initialized');
+    } catch (e, stack) {
+      _initialized = false;
+      _initializationError = e.toString();
+      debugPrint('[EngineBridge] Native runtime initialization failed: $e');
+      debugPrintStack(stackTrace: stack);
     }
   }
 
   static void _bindFunctions() {
     _engineInit = _lib.lookupFunction<Int32 Function(Int32), int Function(int)>('x360_engine_init');
     _engineShutdown = _lib.lookupFunction<Void Function(), void Function()>('x360_engine_shutdown');
+    _setDirectories = _lib.lookupFunction<Void Function(Pointer<Utf8>, Pointer<Utf8>), void Function(Pointer<Utf8>, Pointer<Utf8>)>('x360_engine_set_directories');
     _xexLoad = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('x360_xex_load');
     _stfsLoad = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('x360_stfs_load');
     _isoLoad = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('x360_iso_load');
@@ -106,19 +134,18 @@ class EngineBridge {
     _jitResume = _lib.lookupFunction<Void Function(), void Function()>('x360_jit_resume');
     _gpuSetSurface = _lib.lookupFunction<Int32 Function(Pointer<Void>), int Function(Pointer<Void>)>('x360_gpu_set_surface');
     _gpuClearSurface = _lib.lookupFunction<Void Function(), void Function()>('x360_gpu_clear_surface');
-    _metricsGetFps = _lib.lookupFunction<Double Function(), double Function()>('x360_metrics_fps');
-    _metricsGetFrameTime = _lib.lookupFunction<Double Function(), double Function()>('x360_metrics_frame_time');
-    _metricsGetRamUsage = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_ram_bytes');
-    _metricsGetCpuUsage = _lib.lookupFunction<Double Function(), double Function()>('x360_metrics_cpu_usage');
-    _metricsGetGpuTemp = _lib.lookupFunction<Double Function(), double Function()>('x360_metrics_gpu_temp');
-    _metricsGetJitBlocks = _lib.lookupFunction<Int32 Function(), int Function()>('x360_metrics_jit_blocks');
-    _settingsSetResolution = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('x360_settings_resolution');
-    _settingsSetAf = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_af');
-    _settingsSetAa = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_aa');
-    _settingsSetFpsLimit = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_fps_limit');
-    _settingsSetJitThreads = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_jit_threads');
+    _metricsGetFps = _lib.lookupFunction<Float Function(), double Function()>('x360_metrics_fps');
+    _metricsGetFrameTime = _lib.lookupFunction<Float Function(), double Function()>('x360_metrics_frame_time');
+    _metricsGetRamUsage = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_ram');
+    _metricsGetGpuTemp = _lib.lookupFunction<Float Function(), double Function()>('x360_metrics_gpu_temp');
+    _metricsGetJitBlocks = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_blocks_compiled');
+    _settingsSetResolution = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('x360_settings_set_resolution');
+    _settingsSetAf = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_af');
+    _settingsSetAa = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_aa');
+    _settingsSetFpsLimit = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_fps_limit');
+    _settingsSetJitThreads = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_jit_threads');
     _inputSetState = _lib.lookupFunction<Void Function(Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32), void Function(int, int, int, int, int, int, int, int)>('x360_input_set_state');
-    _inputSetRumble = _lib.lookupFunction<Void Function(Int32, Int32, Int32), void Function(int, int, int)>('x360_input_rumble');
+    _inputSetRumble = _lib.lookupFunction<Void Function(Int32, Int32, Int32), void Function(int, int, int)>('x360_input_set_rumble');
   }
 
   // ─── Instance API ─────────────────────────────────────────────────────────
@@ -189,8 +216,8 @@ class EngineBridge {
     if (!_initialized) return const EngineMetrics();
     return EngineMetrics(
       fps: _metricsGetFps(),
-      frameTimeMs: _metricsGetFrameTime() * 1000,
-      cpuUsagePercent: _metricsGetCpuUsage() * 100,
+      frameTimeMs: _metricsGetFrameTime(),
+      cpuUsagePercent: 0, // Not implemented in the native metrics API
       ramUsageBytes: _metricsGetRamUsage(),
       gpuTempCelsius: _metricsGetGpuTemp(),
       jitBlocksCompiled: _metricsGetJitBlocks(),
@@ -199,10 +226,10 @@ class EngineBridge {
 
   // ─── Static convenience shims ─────────────────────────────────────────────
   static double getFps()       => _initialized ? _metricsGetFps() : 0.0;
-  static double getFrameTime() => _initialized ? _metricsGetFrameTime() * 1000 : 0.0;
+  static double getFrameTime() => _initialized ? _metricsGetFrameTime() : 0.0;
   static int getRamUsage()     => _initialized ? _metricsGetRamUsage() : 0;
   static double getGpuTemp()   => _initialized ? _metricsGetGpuTemp() : 0.0;
-  static void shutdown() { if (_initialized) _engineShutdown(); }
+  static void shutdown() { if (_initialized) { _engineShutdown(); _initialized = false; } }
   static bool get isAvailable => _initialized;
   static int loadXex(String path) => instance.loadGame(path, GameFormat.xex);
   static int loadIso(String path) => instance.loadGame(path, GameFormat.iso);

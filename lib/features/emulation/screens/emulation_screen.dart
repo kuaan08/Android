@@ -76,19 +76,21 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
 
   Future<void> _startEmulation() async {
     setState(() => _statusMessage = 'Loading game…');
-    final game = ref.read(libraryProvider).valueOrNull
-        ?.firstWhere((g) => g.titleId == widget.titleId, orElse: () => throw Exception('Game not found'));
-
-    if (game == null) {
-      if (mounted) context.pop();
-      return;
-    }
-
     try {
+      final matches = ref.read(libraryProvider).valueOrNull
+          ?.where((g) => g.titleId == widget.titleId);
+      if (matches == null || matches.isEmpty) {
+        if (mounted) _showError('Game not found in the imported library.');
+        return;
+      }
+      final game = matches.first;
       setState(() => _statusMessage = 'Initializing native runtime…');
-      await EngineBridge.initialize();
+      await EngineBridge.initialize(gameDirectory: game.installDir);
+      if (!mounted) return;
       if (!EngineBridge.isAvailable) {
-        if (mounted) _showError('Native ARM64 runtime is unavailable on this device.');
+        if (mounted) _showError('Native ARM64 runtime could not initialize.\n\n' +
+            (EngineBridge.initializationError ?? 'Unknown native error') +
+            '\n\nThe app contains the ARM64 library; this error is not proof your processor is unsupported.');
         return;
       }
       setState(() => _statusMessage = 'Parsing executable…');
@@ -184,7 +186,7 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
         child: Stack(
           children: [
             // Native rendering surface
-            const _GameSurface(),
+            if (_isRunning) const _GameSurface(),
 
             // Loading overlay
             if (!_isRunning)

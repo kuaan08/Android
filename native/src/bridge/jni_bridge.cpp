@@ -39,13 +39,33 @@ uint8_t*                  g_guestMemory  = nullptr;
 static constexpr uint64_t GUEST_BASE     = 0x00000000ULL;
 
 static int g_logLevel = 1;
+static std::atomic<bool> g_titleReady{false};
+
+namespace x360 { namespace bridge {
+    int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen);
+} }
+
 
 // ─── dart:ffi C entry points ─────────────────────────────────────────────────
 extern "C" {
 
+void x360_engine_set_directories(const char* gameDir, const char* saveDir) {
+    if (g_initialized.load()) {
+        LOGE("Cannot change HLE directories after engine initialization");
+        return;
+    }
+    g_gameDir = gameDir ? gameDir : "";
+    g_saveDir = saveDir ? saveDir : "";
+    LOGI("HLE game directory and save directory configured");
+}
+
 int32_t x360_engine_init(int32_t logLevel) {
     g_logLevel = logLevel;
     if (g_initialized.load()) return 0;
+    if (g_gameDir.empty() || g_saveDir.empty()) {
+        LOGE("HLE directories must be configured before native initialization");
+        return -3;
+    }
 
     LOGI("Initializing Xbox360 engine (log level %d)", logLevel);
 
@@ -86,11 +106,13 @@ void x360_engine_shutdown() {
         g_guestMemory = nullptr;
     }
     g_initialized.store(false);
+    g_titleReady.store(false);
     LOGI("Engine shutdown complete");
 }
 
 int32_t x360_xex_load(const char* path, char* outTitleId, int32_t outLen) {
-    if (!g_initialized.load()) return -1;
+    g_titleReady.store(false);
+    if (!g_initialized.load() || !path) return -1;
     LOGI("Loading XEX: %s", path);
 
     x360::XexImage img;
@@ -105,11 +127,16 @@ int32_t x360_xex_load(const char* path, char* outTitleId, int32_t outLen) {
     }
 
     const uint64_t imageOffset = img.baseAddress - GUEST_BASE;
-    if (g_guestMemory && imageOffset + img.rawMemory.size() <= GUEST_MEM_SIZE) {
-        memcpy(g_guestMemory + imageOffset, img.rawMemory.data(), img.rawMemory.size());
+    if (!g_guestMemory || imageOffset > GUEST_MEM_SIZE ||
+        img.rawMemory.size() > GUEST_MEM_SIZE - imageOffset) {
+        LOGE("XEX image outside 4 GiB guest address space");
+        return -4;
     }
-
-    return g_jitEngine.init(g_guestMemory, GUEST_MEM_SIZE, GUEST_BASE, img.entryPoint) ? 0 : -3;
+    memcpy(g_guestMemory + imageOffset, img.rawMemory.data(), img.rawMemory.size());
+    if (!g_jitEngine.init(g_guestMemory, GUEST_MEM_SIZE, GUEST_BASE, img.entryPoint))
+        return -3;
+    g_titleReady.store(true);
+    return 0;
 }
 
 int32_t x360_stfs_load(const char* path, char* outTitleId, int32_t outLen) {
@@ -131,33 +158,39 @@ int32_t x360_stfs_load(const char* path, char* outTitleId, int32_t outLen) {
 }
 
 int32_t x360_iso_load(const char* path, char* outTitleId, int32_t outLen) {
-    if (!g_initialized.load()) return -1;
-    LOGI("Loading ISO: %s", path);
-
-    x360::IsoParser parser;
-    if (!parser.open(std::string(path))) {
-        LOGE("ISO open failed: %s", parser.lastError().c_str());
-        return -2;
-    }
-
-    if (outTitleId && outLen > 0) {
-        strncpy(outTitleId, "ISO_GAME", static_cast<size_t>(outLen) - 1);
-        outTitleId[outLen - 1] = '\0';
-    }
-    return 0;
+    g_titleReady.store(false);
+    if (!g_initialized.load() || !path) return -1;
+    // Old code only checked the disc header and returned success without
+    // loading default.xex or configuring the JIT. Use the real loader.
+    const int32_t result = x360::bridge::loadIsoGame(path, outTitleId, outLen);
+    g_titleReady.store(result == 0);
+    return result;
 }
 
 void x360_game_unload() {
+    g_titleReady.store(false);
     g_jitEngine.stop();
     LOGI("Game unloaded");
 }
 
 int32_t x360_jit_start(int32_t threadCount) {
+    if (!g_initialized.load() || !g_titleReady.load()) {
+        LOGE("Refusing to run JIT: no XEX has been loaded successfully");
+        return -2;
+    }
     return g_jitEngine.start(threadCount) ? 0 : -1;
 }
 
 void x360_jit_stop() {
     g_jitEngine.stop();
+}
+
+void x360_jit_pause() {
+    if (g_initialized.load()) g_jitEngine.pause();
+}
+
+void x360_jit_resume() {
+    if (g_initialized.load()) g_jitEngine.resume();
 }
 
 int32_t x360_jit_get_state() {

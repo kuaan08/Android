@@ -43,6 +43,9 @@ namespace x360 { namespace hle {
 namespace x360 {
 namespace hle {
 
+// The guest heap allocator needs the mapped host base before first XMemAlloc.
+void initMemorySubsystem(uint8_t* guestMemory, uint64_t guestBase);
+
 // Forward declarations from audio.cpp
 void hleSubmitSourceBuffer(const uint8_t*, uint32_t, uint32_t, uint32_t, bool, float, bool);
 void hleSetMasterVolume(float volume);
@@ -52,6 +55,7 @@ bool HleKernel::init(uint8_t* guestMemory, uint64_t guestBase,
                      const std::string& gameDir, const std::string& saveDir) {
     m_guestMemory = guestMemory;
     m_guestBase   = guestBase;
+    initMemorySubsystem(guestMemory, guestBase);
     m_gameDir     = gameDir;
     m_saveDir     = saveDir;
 

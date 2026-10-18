@@ -65,6 +65,8 @@ jobs:
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
       - name: Compile debug Android ARM64 APK
         run: flutter build apk --debug --target-platform android-arm64
+      - name: Verify packaged ARM64 JNI/FFI ABI
+        run: python3 ci/check_ffi_abi.py build/app/outputs/flutter-apk/app-debug.apk
       - name: Verify APK exists
         run: test -s build/app/outputs/flutter-apk/app-debug.apk
       - uses: actions/upload-artifact@v4
