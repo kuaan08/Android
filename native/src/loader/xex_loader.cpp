@@ -1,242 +1,257 @@
 /**
- * XEX2 Loader — parse, decrypt (AES-128-CBC), decompress (LZX/LZXDELTA)
- * and map an Xbox 360 executable into guest address space.
+ * Bounded XEX2 header reader.
  *
- * Reference: xenia/src/xenia/cpu/xex_module.cc (MIT license, architecture reference only)
+ * Xbox 360 XEX2 is big-endian. Optional header types use their exact 32-bit
+ * keys; entries whose low byte is 0xFF are variable-sized data offsets.
+ * Layout reference: xenia/kernel/util/xex2_info.h (structs and keys).
+ *
+ * This is NOT yet a full Xbox 360 executable loader. Encryption/LZX import
+ * relocation and full PE image mapping need separate implementations.
+ * Unsupported formats must NEVER be treated as ready-to-execute machine code.
  */
 #include "../../include/loader/xex_loader.h"
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <android/log.h>
+#include <limits>
+#include <vector>
 
-#define LOG_TAG "X360:XEX"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,"X360:XEX",__VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,"X360:XEX",__VA_ARGS__)
+#else
+#define LOGI(...) do {} while(0)
+#define LOGE(...) do {} while(0)
+#endif
 
 namespace x360 {
+namespace {
+constexpr uint32_t kMagic = 0x58455832; // XEX2
+constexpr uint32_t kEntryPoint = 0x00010100;
+constexpr uint32_t kExecutionInfo = 0x00040006;
+constexpr uint32_t kFileFormat = 0x000003FF;
+constexpr uint32_t kImports = 0x000103FF;
+constexpr size_t kMaxXexBytes = 512ULL * 1024 * 1024;
+constexpr uint64_t kGuestSize = 0x100000000ULL;
 
-// ─── XEX2 on-disk structures (big-endian) ──────────────────────────────────────
-
-#pragma pack(push, 1)
-struct XexRawHeader {
-    uint32_t magic;                     // 'XEX2'
-    uint32_t moduleFlags;
-    uint32_t sizeOfHeaders;
-    uint32_t sizeOfDiscardableHeaders;
-    uint32_t securityInfoOffset;
-    uint32_t headerDirectoryEntryCount;
-};
-
-struct XexDirectoryEntry {
-    uint32_t key;
-    uint32_t value;                     // either inline value or file offset
-};
-
-struct XexSecurityInfo {
-    uint32_t size;
-    uint32_t imageSize;
-    uint8_t  rsa2048Signature[0x100];
-    uint8_t  aes128Key[0x10];           // session key (encrypted with console-specific key)
-    uint32_t imageFlags;
-    uint32_t loadAddress;               // base address in guest VM (e.g. 0x82000000)
-    uint8_t  imageHash[0x14];           // SHA-1 of full image
-    uint32_t importTableCount;
-    uint8_t  importTableHash[0x14];
-    uint8_t  mediaID[0x10];
-    uint8_t  fileKeyAes[0x10];          // file key for decryption (XOR'd with console key)
-    uint32_t exportTableAddress;
-    uint8_t  headerHash[0x14];
-    uint32_t region;
-};
-
-struct XexExecutionInfo {
-    uint32_t mediaID;
-    uint32_t version;
-    uint32_t baseVersion;
-    char     titleID[4];
-    uint8_t  platform;
-    uint8_t  executionType;
-    uint8_t  discNum;
-    uint8_t  discCount;
-    uint32_t savegameID;
-};
-#pragma pack(pop)
-
-// Xbox 360 retail AES key (public knowledge, used to derive session key)
-// This is the "1BL key" used for XEX decryption — documented in Xenia and Xbox 360 SDK leaks
-static const uint8_t kXex2RetailKey[16] = {
-    0x20, 0xB1, 0x85, 0xA5, 0x9D, 0x28, 0xDC, 0x6E,
-    0xC5, 0x44, 0xD8, 0x1D, 0x29, 0x7E, 0xD6, 0x41
-};
-
-// ─── Byte swap helpers ──────────────────────────────────────────────────────────
-static inline uint32_t be32(uint32_t v) { return __builtin_bswap32(v); }
-static inline uint16_t be16(uint16_t v) { return __builtin_bswap16(v); }
-
-// ─── XexLoader implementation ──────────────────────────────────────────────────
+// No reinterpret_cast reads of unaligned guest big-endian structures.
+uint16_t read16(const uint8_t* p) {
+    return (uint16_t(p[0]) << 8) | uint16_t(p[1]);
+}
+uint32_t read32(const uint8_t* p) {
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+           (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
+bool within(size_t total, uint64_t pos, uint64_t len) {
+    return pos <= total && len <= total - pos;
+}
+} // namespace
 
 XexLoader::XexLoader() = default;
 XexLoader::~XexLoader() = default;
 
-bool XexLoader::load(const std::string& path, XexImage& outImage) {
-    // Read entire file
+bool XexLoader::load(const std::string& path, XexImage& image) {
+    m_lastError.clear();
+    image = XexImage{};
+
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
-        m_lastError = "Cannot open file: " + path;
+        m_lastError = "Cannot open extracted default.xex";
         return false;
     }
-    size_t fileSize = file.tellg();
+    const auto end = file.tellg();
+    if (end <= 0 || static_cast<uint64_t>(end) > kMaxXexBytes) {
+        m_lastError = "XEX executable is empty or exceeds the 512 MiB safety limit";
+        return false;
+    }
+    const size_t size = static_cast<size_t>(end);
+    std::vector<uint8_t> data(size);
     file.seekg(0);
-    std::vector<uint8_t> raw(fileSize);
-    file.read(reinterpret_cast<char*>(raw.data()), fileSize);
-    file.close();
+    if (!file.read(reinterpret_cast<char*>(data.data()),
+                   static_cast<std::streamsize>(data.size()))) {
+        m_lastError = "XEX executable could not be read completely";
+        return false;
+    }
 
-    LOGI("Loaded %zu bytes from %s", fileSize, path.c_str());
-
-    if (!parseHeader(raw, outImage)) return false;
-    if (!decryptSections(raw, outImage)) return false;
-    if (!decompressSections(raw, outImage)) return false;
-    if (!resolveImports(outImage)) return false;
-    if (!mapToVirtualMemory(outImage)) return false;
-
-    LOGI("XEX loaded: titleId=%s base=0x%08X entry=0x%08X",
-         outImage.titleId.c_str(), outImage.baseAddress, outImage.entryPoint);
+    if (!parseHeader(data, image)) { LOGE("%s", m_lastError.c_str()); return false; }
+    if (!decryptSections(data, image)) { LOGE("%s", m_lastError.c_str()); return false; }
+    if (!decompressSections(data, image)) { LOGE("%s", m_lastError.c_str()); return false; }
+    if (!resolveImports(image)) { LOGE("%s", m_lastError.c_str()); return false; }
+    if (!mapToVirtualMemory(image)) { LOGE("%s", m_lastError.c_str()); return false; }
+    LOGI("XEX2 metadata: TitleID=%s, base=0x%08X, entry=0x%08X",
+         image.titleId.c_str(), image.baseAddress, image.entryPoint);
     return true;
 }
 
 bool XexLoader::parseHeader(const std::vector<uint8_t>& raw, XexImage& img) {
-    if (raw.size() < sizeof(XexRawHeader)) {
-        m_lastError = "File too small to be a XEX"; return false;
+    if (!within(raw.size(), 0, 24) || read32(raw.data()) != kMagic) {
+        m_lastError = "Not an XEX2 executable (missing XEX2 magic)";
+        return false;
+    }
+    const uint32_t flags = read32(raw.data() + 4);
+    const uint32_t headerSize = read32(raw.data() + 8);
+    const uint32_t securityOffset = read32(raw.data() + 16);
+    const uint32_t count = read32(raw.data() + 20);
+    if (count > 4096 || !within(raw.size(), 24, uint64_t(count) * 8) ||
+        headerSize < 24 + uint64_t(count) * 8 || headerSize >= raw.size() ||
+        !within(raw.size(), securityOffset, 0x184)) {
+        m_lastError = "XEX2 header directory or security information is truncated";
+        return false;
     }
 
-    const auto* hdr = reinterpret_cast<const XexRawHeader*>(raw.data());
-    if (be32(hdr->magic) != XEX2_MAGIC) {
-        m_lastError = "Not a XEX2 file (bad magic)"; return false;
+    // XEX2 security information, NOT XEX1 (load address at 0x110).
+    const uint32_t imageSize = read32(raw.data() + securityOffset + 4);
+    const uint32_t loadAddress = read32(raw.data() + securityOffset + 0x110);
+    if (imageSize == 0 || imageSize > kMaxXexBytes ||
+        uint64_t(loadAddress) + imageSize > kGuestSize) {
+        m_lastError = "XEX2 security info has invalid image size or guest load address";
+        return false;
     }
+    img.header.magic = kMagic;
+    img.header.moduleFlags = flags;
+    img.header.sizeOfHeaders = headerSize;
+    img.header.securityOffset = securityOffset;
+    img.header.headerDirectoryEntryCount = count;
+    img.header.baseAddress = loadAddress;
+    img.baseAddress = loadAddress;
+    img.header.compressionType = XexCompressionType::None;
+    img.header.encryptionType = XexEncryptionType::None;
 
-    img.header.magic = be32(hdr->magic);
-    img.header.moduleFlags = be32(hdr->moduleFlags);
-    img.header.sizeOfHeaders = be32(hdr->sizeOfHeaders);
-    img.header.sizeOfDiscardableHeaders = be32(hdr->sizeOfDiscardableHeaders);
-
-    // Parse security info
-    const uint32_t secOffset = be32(hdr->securityInfoOffset);
-    if (secOffset + sizeof(XexSecurityInfo) > raw.size()) {
-        m_lastError = "Security info out of bounds"; return false;
-    }
-    const auto* sec = reinterpret_cast<const XexSecurityInfo*>(raw.data() + secOffset);
-    img.header.baseAddress = be32(sec->loadAddress);
-    img.baseAddress        = img.header.baseAddress;
-
-    // Title ID from execution info
-    char titleBuf[9] = {};
-    snprintf(titleBuf, sizeof(titleBuf), "%02X%02X%02X%02X",
-        (uint8_t)sec->imageHash[0], (uint8_t)sec->imageHash[1],
-        (uint8_t)sec->imageHash[2], (uint8_t)sec->imageHash[3]);
-    img.titleId = titleBuf;
-
-    // Parse directory entries to find execution info, entry point, imports
-    const uint32_t dirCount = be32(hdr->headerDirectoryEntryCount);
-    const auto* dirs = reinterpret_cast<const XexDirectoryEntry*>(
-        raw.data() + sizeof(XexRawHeader));
-
-    for (uint32_t i = 0; i < dirCount && (uint8_t*)(dirs + i + 1) <= raw.data() + raw.size(); i++) {
-        const uint32_t key = be32(dirs[i].key);
-        const uint32_t val = be32(dirs[i].value);
-
-        switch (key) {
-        case 0x00010100: // System flags
-            break;
-        case 0x00020200: { // Execution info
-            const auto* exec = reinterpret_cast<const XexExecutionInfo*>(raw.data() + val);
-            char tid[9];
-            snprintf(tid, sizeof(tid), "%02X%02X%02X%02X",
-                (uint8_t)exec->titleID[0], (uint8_t)exec->titleID[1],
-                (uint8_t)exec->titleID[2], (uint8_t)exec->titleID[3]);
-            img.titleId = tid;
-            break;
+    bool foundEntry = false;
+    bool foundFormat = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t* item = raw.data() + 24 + size_t(i) * 8;
+        const uint32_t key = read32(item);
+        const uint32_t value = read32(item + 4);
+        if (key == kEntryPoint) {
+            img.entryPoint = value;
+            img.header.entryPoint = value;
+            foundEntry = true;
+        } else if (key == kExecutionInfo) {
+            if (!within(raw.size(), value, 24) || uint64_t(value) + 24 > headerSize) {
+                m_lastError = "XEX2 execution info offset is out of bounds";
+                return false;
+            }
+            char title[9]{};
+            std::snprintf(title, sizeof(title), "%08X", read32(raw.data() + value + 12));
+            img.titleId = title;
+        } else if (key == kFileFormat) {
+            if (!within(raw.size(), value, 8) || uint64_t(value) + 8 > headerSize) {
+                m_lastError = "XEX2 file-format header is out of bounds";
+                return false;
+            }
+            const uint32_t infoSize = read32(raw.data() + value);
+            if (infoSize < 8 || !within(raw.size(), value, infoSize) ||
+                uint64_t(value) + infoSize > headerSize) {
+                m_lastError = "XEX2 compression header has invalid length";
+                return false;
+            }
+            const uint16_t encryption = read16(raw.data() + value + 4);
+            const uint16_t compression = read16(raw.data() + value + 6);
+            if (encryption > 1 || compression > 3) {
+                m_lastError = "XEX2 encryption or compression uses an unknown format";
+                return false;
+            }
+            img.header.encryptionType = static_cast<XexEncryptionType>(encryption);
+            img.header.compressionType = static_cast<XexCompressionType>(compression);
+            // Keep offsets for BASIC compression block descriptors.
+            img.header.resourceTableOffset = value;
+            img.header.executableTableOffset = infoSize;
+            foundFormat = true;
+        } else if (key == kImports) {
+            img.header.importTableOffset = value;
         }
-        case 0x00020100: // Entry point
-            img.entryPoint = val;
-            img.header.entryPoint = val;
-            break;
-        case 0x000002FF: // File format info (compression + encryption type)
-            img.header.compressionType = static_cast<XexCompressionType>((val >> 16) & 0xFF);
-            img.header.encryptionType  = static_cast<XexEncryptionType>(val & 0xFF);
-            break;
-        case 0x000003FF: // Import libraries table offset
-            img.header.importTableOffset = val;
-            break;
-        }
     }
 
-    // Store security key for later decryption
-    memcpy(&img.header, sec, std::min(sizeof(img.header), sizeof(XexSecurityInfo)));
-
-    LOGI("XEX header parsed: base=0x%08X entry=0x%08X titleId=%s",
-         img.baseAddress, img.entryPoint, img.titleId.c_str());
+    if (!foundEntry || img.entryPoint < img.baseAddress ||
+        uint64_t(img.entryPoint) >= uint64_t(img.baseAddress) + imageSize) {
+        m_lastError = "XEX2 entry point missing or outside the executable image";
+        return false;
+    }
+    if (!foundFormat) {
+        m_lastError = "XEX2 required file-format header (0x000003FF) is missing";
+        return false;
+    }
+    LOGI("XEX2 parsed: title=%s, encryption=%u, compression=%u, base=%08X, entry=%08X",
+         img.titleId.c_str(),
+         static_cast<unsigned>(img.header.encryptionType),
+         static_cast<unsigned>(img.header.compressionType),
+         img.baseAddress, img.entryPoint);
     return true;
 }
 
-bool XexLoader::decryptSections(std::vector<uint8_t>& data, XexImage& img) {
-    if (img.header.encryptionType == XexEncryptionType::None) {
-        LOGI("XEX not encrypted, skipping decryption");
-        return true;
-    }
-
-    // For encrypted XEX, AES-CBC decrypt the content using the file key.
-    // Full retail key derivation is non-trivial; this is a stub.
-    LOGI("XEX encrypted — decryption stub (full key derivation not yet implemented)");
-
-    // TODO: implement full retail-key AES-128-CBC decryption
-    // Reference: xenia xex_module.cc DecryptKey() + DecryptSection()
-    return true;
-}
-
-bool XexLoader::decompressSections(std::vector<uint8_t>& data, XexImage& img) {
-    if (img.header.compressionType == XexCompressionType::None) {
-        LOGI("XEX not compressed");
-        img.rawMemory = data; // store raw
-        return true;
-    }
-
-    if (img.header.compressionType == XexCompressionType::Basic) {
-        // Basic: zero-extends sections — copy sections directly
-        LOGI("XEX basic compression (section copy)");
-        img.rawMemory = data;
-        return true;
-    }
-
-    if (img.header.compressionType == XexCompressionType::Normal) {
-        LOGI("XEX LZX compression — decompression stub");
-        // TODO: full LZX window decompression
-        // Reference: xenia LZXDecompress() in src/xenia/cpu/xex_module.cc
-        img.rawMemory = data;
-        return true;
-    }
-
-    m_lastError = "Unsupported compression type";
+bool XexLoader::decryptSections(std::vector<uint8_t>&, XexImage& image) {
+    if (image.header.encryptionType == XexEncryptionType::None) return true;
+    // Never pass encrypted code through as valid PPC instructions.
+    m_lastError = "XEX2 uses encrypted executable data (AES); decryption is not implemented";
     return false;
 }
 
-bool XexLoader::resolveImports(XexImage& img) {
-    // Parse the import table to enumerate HLE call sites
-    // Each imported function becomes a HLE thunk registered with the JIT
-    LOGI("Resolving imports (stub — %zu known)", img.imports.size());
-    // TODO: walk img.header.importTableOffset and populate img.imports
+bool XexLoader::decompressSections(std::vector<uint8_t>& data, XexImage& image) {
+    const size_t payloadStart = image.header.sizeOfHeaders;
+    const size_t maxOutput = kMaxXexBytes;
+    const auto compression = image.header.compressionType;
+    if (compression == XexCompressionType::None) {
+        image.rawMemory.assign(data.begin() + payloadStart, data.end());
+        return !image.rawMemory.empty();
+    }
+
+    if (compression == XexCompressionType::Basic) {
+        const size_t descriptor = image.header.resourceTableOffset;
+        const size_t infoSize = image.header.executableTableOffset;
+        if (infoSize <= 8 || (infoSize - 8) % 8 != 0) {
+            m_lastError = "Invalid XEX2 BASIC compression block table";
+            return false;
+        }
+        size_t input = payloadStart;
+        for (size_t pos = descriptor + 8; pos < descriptor + infoSize; pos += 8) {
+            const size_t dataSize = read32(data.data() + pos);
+            const size_t zeros = read32(data.data() + pos + 4);
+            if (!within(data.size(), input, dataSize) ||
+                dataSize > maxOutput - image.rawMemory.size() ||
+                zeros > maxOutput - image.rawMemory.size() - dataSize) {
+                m_lastError = "Invalid XEX2 BASIC block lengths (truncated or oversized)";
+                image.rawMemory.clear();
+                return false;
+            }
+            image.rawMemory.insert(image.rawMemory.end(),
+                                   data.begin() + input, data.begin() + input + dataSize);
+            image.rawMemory.insert(image.rawMemory.end(), zeros, uint8_t(0));
+            input += dataSize;
+        }
+        if (image.rawMemory.empty()) {
+            m_lastError = "XEX2 BASIC decompression produced an empty image";
+            return false;
+        }
+        return true;
+    }
+
+    // LZX may require block chaining, window restoration and AES first.
+    // A fake successful decompression is more harmful than a precise error.
+    m_lastError = (compression == XexCompressionType::Normal)
+        ? "XEX2 uses LZX (normal) compression; full decompression is not implemented"
+        : "XEX2 uses DELTA compression; delta patching is not implemented";
+    return false;
+}
+
+bool XexLoader::resolveImports(XexImage&) {
+    // TODO: enumerate imported Xbox kernel/XAM APIs and patch HLE thunks.
     return true;
 }
 
 bool XexLoader::mapToVirtualMemory(XexImage& img) {
-    // The actual copy into guest memory is done by jni_bridge after load().
-    // rawMemory holds the decrypted/decompressed image bytes.
     if (img.rawMemory.empty()) {
-        m_lastError = "No image data to map";
+        m_lastError = "XEX2 image payload is empty";
         return false;
     }
-    LOGI("Image ready to map: %zu bytes at guest base 0x%08X",
-         img.rawMemory.size(), img.baseAddress);
+    if (uint64_t(img.baseAddress) + img.rawMemory.size() > kGuestSize) {
+        m_lastError = "XEX2 image exceeds the guest address space";
+        return false;
+    }
+    // PE section alignment and relocations are still experimental. A valid
+    // XEX2 parser result alone does not demonstrate playable execution.
     return true;
 }
-
 } // namespace x360
