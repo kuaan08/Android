@@ -85,6 +85,12 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
     }
 
     try {
+      setState(() => _statusMessage = 'Initializing native runtime…');
+      await EngineBridge.initialize();
+      if (!EngineBridge.isAvailable) {
+        if (mounted) _showError('Native ARM64 runtime is unavailable on this device.');
+        return;
+      }
       setState(() => _statusMessage = 'Parsing executable…');
       final bridge = EngineBridge.instance;
       int result = bridge.loadGame(game.execPath, game.format);
