@@ -1,6 +1,8 @@
 #include "../native/include/loader/iso_parser.h"
 
+#include <algorithm>
 #include <array>
+#include <unistd.h>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
