@@ -180,6 +180,8 @@ ShaderEntry* GpuLayer::getOrCompileShader(const uint8_t* microcode, uint32_t siz
 
     auto it = m_shaderCache.find(hash);
     if (it != m_shaderCache.end()) return &it->second;
+    m_shadersRequested.fetch_add(1, std::memory_order_relaxed);
+    m_shaderBusy.store(true);
 
     ShaderEntry entry{};
     entry.microCodeHash = hash;
