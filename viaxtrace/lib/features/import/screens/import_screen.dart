@@ -19,6 +19,40 @@ class ImportScreen extends ConsumerStatefulWidget {
 
 class _ImportScreenState extends ConsumerState<ImportScreen> {
   bool _importing = false;
+  bool _copyingFromProvider = false;
+  String _copyStep = 'Opening Android file picker...';
+  String _copyDetails = 'Choose an ISO stored on this device.';
+  double? _copyProgress;
+  static const MethodChannel _importChannel =
+      MethodChannel('com.viaxecomp.xbox360recomp/import');
+
+  @override
+  void initState() {
+    super.initState();
+    _importChannel.setMethodCallHandler((call) async {
+      if (call.method != 'importProgress' || !mounted) return;
+      final args = Map<Object?, Object?>.from(call.arguments as Map);
+      final bytes = (args['bytes'] as num?)?.toInt() ?? 0;
+      final total = (args['total'] as num?)?.toInt() ?? -1;
+      setState(() {
+        _copyingFromProvider = true;
+        _copyStep = args['stage']?.toString() ?? 'Copying ISO...';
+        _copyProgress = total > 0
+            ? (bytes / total).clamp(0.0, 1.0).toDouble() : null;
+        _copyDetails = total > 0
+            ? (bytes / 1048576).toStringAsFixed(1) + ' / ' +
+              (total / 1048576).toStringAsFixed(1) + ' MiB'
+            : (bytes / 1048576).toStringAsFixed(1) +
+              ' MiB read (size unavailable)';
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _importChannel.setMethodCallHandler(null);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -116,7 +150,7 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
           ),
           const SizedBox(height: 20),
           Text(
-            importState.isImporting ? importState.currentStep : 'Waiting for Android document provider...',
+            _copyingFromProvider ? _copyStep : (importState.isImporting ? importState.currentStep : 'Opening Android file picker...'),
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
             textAlign: TextAlign.center,
           ),
@@ -124,16 +158,18 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
           ClipRRect(
             borderRadius: BorderRadius.circular(6),
             child: LinearProgressIndicator(
-              value: importState.progress,
+              value: _copyingFromProvider ? _copyProgress : importState.progress,
               minHeight: 6,
             ),
           ),
           const SizedBox(height: 10),
           Text(
-            '${(importState.progress * 100).toStringAsFixed(0)}%',
+            _copyingFromProvider
+                ? (_copyProgress == null ? 'Copying...' : (_copyProgress! * 100).toStringAsFixed(0) + '%')
+                : (importState.progress * 100).toStringAsFixed(0) + '%',
             style: const TextStyle(fontSize: 13, color: Colors.white38, fontWeight: FontWeight.w600),
           ),
-          if (importState.details.isNotEmpty) ...[
+          if ((_copyingFromProvider ? _copyDetails : importState.details).isNotEmpty) ...[
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(12),
@@ -142,7 +178,7 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                importState.details,
+                _copyingFromProvider ? _copyDetails : importState.details,
                 style: const TextStyle(fontSize: 11, color: Colors.white38, fontFamily: 'monospace'),
                 textAlign: TextAlign.center,
               ),
@@ -184,6 +220,12 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
     String? digest;
     int? size;
     bool ownedStaging = false;
+    if (mounted) setState(() {
+      _copyingFromProvider = false;
+      _copyProgress = null;
+      _copyStep = 'Opening Android file picker...';
+      _copyDetails = 'Select your ISO/XISO. Android grants access when you select it.';
+    });
 
     try {
       if (format == GameFormat.iso && Platform.isAndroid) {
@@ -191,9 +233,7 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
         // reliable file paths. Native Kotlin streams the ISO into private
         // app storage in 1 MiB chunks, never buffering an entire disc in RAM.
         setState(() => _importing = true);
-        final payload = await const MethodChannel(
-          'com.viaxecomp.xbox360recomp/import',
-        ).invokeMapMethod<String, dynamic>('pickIso');
+        final payload = await _importChannel.invokeMapMethod<String, dynamic>('pickIso');
         if (payload == null) return;
         path = payload['path'] as String?;
         fileName = payload['name'] as String?;
@@ -226,7 +266,10 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
         }
       }
       if (!mounted) return;
-      setState(() => _importing = true);
+      setState(() {
+        _importing = true;
+        _copyingFromProvider = false;
+      });
       final game = await ref.read(importProvider.notifier).importGame(
         path, format,
         originalName: fileName,
@@ -257,7 +300,7 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
         duration: const Duration(seconds: 10),
       ));
     } finally {
-      if (mounted) setState(() => _importing = false);
+      if (mounted) setState(() { _importing = false; _copyingFromProvider = false; });
     }
   }
 }
