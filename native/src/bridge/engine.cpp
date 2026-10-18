@@ -11,6 +11,10 @@
 #include <android/log.h>
 #include <string>
 #include <filesystem>
+#include <optional>
+#include <fstream>
+#include <cstring>
+#include <algorithm>
 #include <sys/mman.h>
 
 #define LOG_TAG "X360:ENGINE"
@@ -113,36 +117,70 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
         return -1;
     }
 
-    // Find default.xex
-    const x360::IsoFileEntry* xexEntry = nullptr;
-    for (const auto& f : parser.listFiles()) {
-        std::string lower = f.name;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        if (lower.find("default.xex") != std::string::npos) {
-            xexEntry = &f;
+    // listFiles() returns a vector BY VALUE. Never keep a pointer/reference
+    // into that temporary (the old code used a dangling xexEntry).
+    std::optional<x360::IsoFileEntry> xexEntry;
+    for (const auto& file : parser.listFiles()) {
+        if (file.isDirectory) continue;
+        std::string lower = file.name;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (lower == "default.xex" ||
+            (lower.size() >= 12 &&
+             lower.compare(lower.size() - 12, 12, "/default.xex") == 0)) {
+            xexEntry = file; // Take a VALUE copy before listFiles() is destroyed.
             break;
         }
     }
 
     if (!xexEntry) {
         g_lastLoadError = "ISO contains no default.xex executable";
-        LOGE("ENGINE: default.xex not found in ISO");
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
         return -2;
     }
-
-    // Extract to temp
-    std::string xexPath = g_gameDir + "/.iso_extract/default.xex";
-    fs::create_directories(g_gameDir + "/.iso_extract");
-    if (!parser.extractFile(*xexEntry, xexPath)) {
-        g_lastLoadError = "Could not extract default.xex from ISO";
-        LOGE("ENGINE: ISO extract failed");
+    if (xexEntry->size < 24 || xexEntry->size > 512U * 1024U * 1024U) {
+        g_lastLoadError = "ISO default.xex entry size is invalid or exceeds the 512 MiB limit";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
         return -3;
     }
 
-    // Load XEX
-    x360::XexImage img;
+    // Extract into private app storage; do not retain dangling ISO entry data.
+    const fs::path directory = fs::path(g_gameDir) / ".iso_extract";
+    std::error_code directoryError;
+    fs::create_directories(directory, directoryError);
+    if (directoryError) {
+        g_lastLoadError = "Could not create private XEX extraction directory: " +
+                          directoryError.message();
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -3;
+    }
+    const std::string xexPath = (directory / "default.xex").string();
+    if (!parser.extractFile(*xexEntry, xexPath)) {
+        g_lastLoadError = "Could not extract default.xex from ISO: " + parser.lastError();
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -3;
+    }
+
+    // A supposedly extracted XEX with a different magic indicates bad disc
+    // offsets/entry parsing, not unsupported PPC instructions.
+    std::ifstream extracted(xexPath, std::ios::binary);
+    char magic[4]{};
+    if (!extracted.read(magic, sizeof(magic)) ||
+        std::memcmp(magic, "XEX2", sizeof(magic)) != 0) {
+        g_lastLoadError =
+            "Extracted default.xex is not XEX2 (invalid magic). "
+            "ISO directory offsets or disc format may be incorrect.";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -4;
+    }
+    extracted.close();
+
+    x360::XexImage img{};
     if (!g_xexLoader.load(xexPath, img)) {
-        LOGE("ENGINE: XEX load failed: %s", g_xexLoader.lastError().c_str());
+        g_lastLoadError = g_xexLoader.lastError();
+        if (g_lastLoadError.empty())
+            g_lastLoadError = "XEX2 loader failed without an internal reason";
+        LOGE("ENGINE: XEX load failed: %s", g_lastLoadError.c_str());
         return -4;
     }
 
