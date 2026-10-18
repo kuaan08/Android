@@ -28,10 +28,30 @@ Choose an ISO/XISO or an extracted folder using the system picker. ISO providers
 
 The native Activity runs in a separate process. Leaving that Activity ends its process so another session does not reuse stale SDL/runtime state. The menu remains in the application process. The experimental JNI can generate PowerPC recompilation sources and export them. The Termux builder is a separate experimental path; a successful minimal ARM64 Android shared-library probe is not proof that the full title builds or runs, and source generation alone does not make the title playable.
 
+## Device diagnostics and test builds
+
+The launcher includes **Device diagnostics (copy)**. It reports Android API/ABIs, whether Android advertises Vulkan, packaged native libraries, free library storage, memory availability and whether optional JNI codegen initialized. It copies the report to the clipboard; the report excludes game contents, filenames, account identifiers and keys. Vulkan feature presence does not prove a game can render correctly.
+
+The CI runs the real Android Java XDVDFS reader on authored synthetic XISO and XGD3 images and verifies that path traversal, corrupted volume headers and truncated entries are rejected. The Android build job generates three distinct artifacts:
+
+- `Xbox360Recomp-Android`: plain library APK, without native game or codegen binaries.
+- `Android-native-validation`: compiled, signed synthetic-title APK plus build/package logs; not a playable commercial game.
+- `Xbox360Recomp-Android-Codegen`: experimental library APK with ReXGlue JNI source generation, but no on-device C++ compilation or playable game.
+
+For device failures, reproduce the issue with the APK installed, copy the diagnostics in the app and collect relevant ADB logs:
+
+```sh
+adb logcat -c
+# Reproduce the problem on the phone, then:
+adb logcat -d -b main,system,crash -v threadtime > xbo360-android-log.txt
+```
+
+Review logs for private data before sharing. The `crash` buffer may expose native faults not captured by the launcher UI. No test artifact should be interpreted as proof of game compatibility.
+
 ## Tests and remaining validation
 
 CI assembles the Java menu with javac/D8/aapt2, aligns it for 16 KB pages, signs it and runs APK signature verification. The native job uses an original two-instruction XEX fixture and compiles its matching Android runtime/library. Consult the actual Actions result for the current revision.
 
 No physical Android device is available in this environment. App startup, storage-provider behavior, controller input, Vulkan rendering, thermal behavior and commercial-game compatibility still require device tests. The menu and native fixture are distinct artifacts; neither is a compatibility claim for arbitrary games.
 
-Local exports reuse a development keystore in the application cache. Preserve it for in-place updates. Release signing with a private production key is separate. The Android Updates button opens the fork's official release page; Android remains responsible for user approval of package installation.
+Local exports reuse a development keystore in the application cache. Preserve it for in-place updates. Release signing with a private production key is separate. The Android Updates button opens [this mobile repository's releases](https://github.com/kuaan08/Android/releases/latest); Android remains responsible for user approval of package installation.
