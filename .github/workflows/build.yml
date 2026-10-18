@@ -42,6 +42,9 @@ jobs:
           flutter-version: '3.22.0'
           cache: true
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - name: Install NDK and CMake
         run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.3.11579264' 'cmake;3.22.1'
       - uses: actions/cache@v4
