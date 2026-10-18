@@ -14,6 +14,16 @@ class EngineMetrics {
   final int ramUsageBytes;
   final double gpuTempCelsius;
   final int jitBlocksCompiled;
+  final int jitState;
+  final int gpuState;
+  final int framesPresented;
+  final int pm4Packets;
+  final int pm4DrawAttempts;
+  final int shaderAttempts;
+  final int shaderCompiled;
+  final int shaderFailed;
+  final bool shaderBusy;
+  final String gpuName;
 
   const EngineMetrics({
     this.fps = 0,
@@ -22,7 +32,38 @@ class EngineMetrics {
     this.ramUsageBytes = 0,
     this.gpuTempCelsius = 0,
     this.jitBlocksCompiled = 0,
+    this.jitState = 0,
+    this.gpuState = 0,
+    this.framesPresented = 0,
+    this.pm4Packets = 0,
+    this.pm4DrawAttempts = 0,
+    this.shaderAttempts = 0,
+    this.shaderCompiled = 0,
+    this.shaderFailed = 0,
+    this.shaderBusy = false,
+    this.gpuName = 'Vulkan GPU not initialized',
   });
+
+  String get shaderStatus {
+    if (shaderBusy) return 'Creating Vulkan shader module...';
+    if (shaderFailed > 0) return 'Shader module failures: $shaderFailed';
+    if (shaderAttempts == 0) return 'No Xenos shader requested';
+    return '$shaderCompiled of $shaderAttempts Vulkan shader modules created (placeholder translator)';
+  }
+
+  String get blackScreenReason {
+    if (jitState == 3) return 'JIT reported an execution error';
+    if (gpuState == 3) return 'Vulkan initialization failed; check logcat';
+    if (gpuState == 0) return 'Waiting for Android Vulkan surface';
+    if (gpuState == 1) return 'Initializing Vulkan device and swapchain';
+    if (framesPresented == 0 && pm4Packets == 0) {
+      return 'No GPU commands from guest (PM4): CPU/HLE/JIT or GPU command bridge incomplete';
+    }
+    if (framesPresented == 0) return 'PM4 reached GPU but no completed Vulkan frame';
+    if (pm4DrawAttempts == 0) return 'Vulkan presented clear frames; game draw commands absent';
+    return 'PM4 draw packets received; draw execution is still a renderer stub';
+  }
+
 }
 
 /// dart:ffi bridge to the native Xbox360 recompiler engine (C++20 NDK).
@@ -66,6 +107,16 @@ class EngineBridge {
   // CPU usage is not exported by this runtime. Do not bind an imaginary symbol.
   static late double Function() _metricsGetGpuTemp;
   static late int Function() _metricsGetJitBlocks;
+  static late int Function() _metricsGpuState;
+  static late int Function() _metricsJitState;
+  static late int Function() _metricsGpuFrames;
+  static late int Function() _metricsPm4Packets;
+  static late int Function() _metricsPm4Draws;
+  static late int Function() _metricsShaderAttempts;
+  static late int Function() _metricsShaderCompiled;
+  static late int Function() _metricsShaderFailed;
+  static late int Function() _metricsShaderBusy;
+  static late int Function(Pointer<Uint8> out, int capacity) _metricsGpuName;
   static late void Function(int width, int height) _settingsSetResolution;
   static late void Function(int af) _settingsSetAf;
   static late void Function(int aa) _settingsSetAa;
@@ -144,6 +195,16 @@ class EngineBridge {
     _metricsGetRamUsage = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_ram');
     _metricsGetGpuTemp = _lib.lookupFunction<Float Function(), double Function()>('x360_metrics_gpu_temp');
     _metricsGetJitBlocks = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_blocks_compiled');
+    _metricsGpuState = _lib.lookupFunction<Int32 Function(), int Function()>('x360_metrics_gpu_state');
+    _metricsJitState = _lib.lookupFunction<Int32 Function(), int Function()>('x360_metrics_jit_state');
+    _metricsGpuFrames = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_gpu_frames');
+    _metricsPm4Packets = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_pm4_packets');
+    _metricsPm4Draws = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_pm4_draw_attempts');
+    _metricsShaderAttempts = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_shader_attempts');
+    _metricsShaderCompiled = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_shader_compiled');
+    _metricsShaderFailed = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_shader_failed');
+    _metricsShaderBusy = _lib.lookupFunction<Int32 Function(), int Function()>('x360_metrics_shader_busy');
+    _metricsGpuName = _lib.lookupFunction<Int32 Function(Pointer<Uint8>, Int32), int Function(Pointer<Uint8>, int)>('x360_metrics_gpu_name');
     _settingsSetResolution = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('x360_settings_set_resolution');
     _settingsSetAf = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_af');
     _settingsSetAa = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_aa');
@@ -236,7 +297,25 @@ class EngineBridge {
 
   EngineMetrics getMetrics() {
     if (!_initialized) return const EngineMetrics();
+    final gpuBuf = calloc<Uint8>(128);
+    String activeGpu = 'Vulkan GPU not initialized';
+    try {
+      _metricsGpuName(gpuBuf, 128);
+      activeGpu = gpuBuf.cast<Utf8>().toDartString();
+    } finally {
+      calloc.free(gpuBuf);
+    }
     return EngineMetrics(
+      gpuName: activeGpu,
+      gpuState: _metricsGpuState(),
+      jitState: _metricsJitState(),
+      framesPresented: _metricsGpuFrames(),
+      pm4Packets: _metricsPm4Packets(),
+      pm4DrawAttempts: _metricsPm4Draws(),
+      shaderAttempts: _metricsShaderAttempts(),
+      shaderCompiled: _metricsShaderCompiled(),
+      shaderFailed: _metricsShaderFailed(),
+      shaderBusy: _metricsShaderBusy() != 0,
       fps: _metricsGetFps(),
       frameTimeMs: _metricsGetFrameTime(),
       cpuUsagePercent: 0, // Not implemented in the native metrics API
