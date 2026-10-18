@@ -5,6 +5,8 @@
 #include <vector>
 #include <unordered_map>
 #include <string>
+#include <atomic>
+#include <mutex>
 #include <vulkan/vulkan.h>
 #include <android/native_window.h>
 
@@ -103,6 +105,21 @@ public:
     bool loadCustomDriver(const std::string& driverPath);
     bool loadTurnipDriver();
 
+    // Read-only, atomically sampled GPU diagnostics; counters report real
+    // native activity, NOT theoretical FPS or simulated shader progress.
+    int rendererStatus() const { return m_rendererStatus.load(); }
+    uint64_t framesPresented() const { return m_presentedFrames.load(); }
+    uint64_t pm4PacketsSeen() const { return m_pm4Packets.load(); }
+    uint64_t pm4DrawCallsSeen() const { return m_drawAttempts.load(); }
+    uint64_t shadersRequested() const { return m_shadersRequested.load(); }
+    uint64_t shadersCompiled() const { return m_shadersCompiled.load(); }
+    uint64_t shadersFailed() const { return m_shadersFailed.load(); }
+    bool shaderCompiling() const { return m_shaderBusy.load(); }
+    std::string gpuName() const {
+        std::lock_guard<std::mutex> guard(m_gpuNameMutex);
+        return m_gpuName;
+    }
+
 private:
     bool createInstance();
     bool selectPhysicalDevice();
@@ -160,6 +177,17 @@ private:
     uint32_t m_frameCount  = 0;
     bool     m_initialized = false;
     ANativeWindow* m_window = nullptr;
+
+    std::atomic<int> m_rendererStatus{0}; // 0 idle, 1 initializing, 2 ready, 3 failed
+    std::atomic<uint64_t> m_presentedFrames{0};
+    std::atomic<uint64_t> m_pm4Packets{0};
+    std::atomic<uint64_t> m_drawAttempts{0};
+    std::atomic<uint64_t> m_shadersRequested{0};
+    std::atomic<uint64_t> m_shadersCompiled{0};
+    std::atomic<uint64_t> m_shadersFailed{0};
+    std::atomic<bool> m_shaderBusy{false};
+    mutable std::mutex m_gpuNameMutex;
+    std::string m_gpuName;
 };
 
 } // namespace gpu
