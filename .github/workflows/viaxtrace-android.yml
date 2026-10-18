@@ -1,0 +1,62 @@
+name: ViaXTrace Android JIT fork verification
+
+on:
+  push:
+    branches:
+      - main
+      - feature/viaxtrace-import-repair
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  iso-parser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify synthetic XDVDFS and ISO9660
+        working-directory: viaxtrace
+        run: |
+          g++ -std=c++20 -O0 -g -Wall -Wextra native/src/loader/iso_parser.cpp tests/iso_parser_smoke.cpp -o /tmp/viax-iso-smoke
+          /tmp/viax-iso-smoke
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.22.0'
+          cache: true
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK and CMake
+        run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.3.11579264' 'cmake;3.22.1'
+      - name: Dependencies and generated Freezed sources
+        working-directory: viaxtrace
+        run: |
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+      - name: Flutter analyze (no errors allowed)
+        working-directory: viaxtrace
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Build ARM64 debug APK
+        working-directory: viaxtrace
+        run: flutter build apk --debug --target-platform android-arm64
+      - name: Verify result
+        run: |
+          test -s viaxtrace/build/app/outputs/flutter-apk/app-debug.apk
+          ls -lh viaxtrace/build/app/outputs/flutter-apk/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ViaXTrace-JIT-ARM64-APK
+          path: viaxtrace/build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 14
+          if-no-files-found: error
