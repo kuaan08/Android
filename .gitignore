@@ -1,0 +1,11 @@
+/gui/target/
+__pycache__/
+*.pyc
+/sdk/
+/dist/
+/projects/
+*.xex
+*.iso
+*.stfs
+*.xcp
+*.log

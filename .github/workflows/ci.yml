@@ -1,0 +1,156 @@
+name: Test and package Xbox 360 Recomp
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xbo360-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui
+      - name: Python checks
+        run: python -m unittest discover -s tests -v
+      - name: Install pinned SDK
+        run: python xbo360.py install-sdk --sdk sdk
+      - name: Official SDK contract tests
+        shell: bash
+        run: XBO360_TEST_SDK="$(pwd)/sdk" python -m unittest discover -s tests -v
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Compile original synthetic XEX through full pipeline
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python ci/make_test_xex.py dist/synthetic-game/Default.xex
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python xbo360.py recompile dist/synthetic-game/Default.xex --project dist/synthetic-project --name fixture --sdk sdk --jobs 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Rust checks
+        run: cargo test --locked --manifest-path gui/Cargo.toml
+      - name: Build frontend
+        if: runner.os == 'Windows'
+        run: cargo build --release --locked --manifest-path gui/Cargo.toml
+      - name: Package Windows portable frontend
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ci/package-windows.ps1
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: Xbox360Recomp-Windows-x64
+          path: dist/Xbox360Recomp-Windows-x64.zip
+          retention-days: 14
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Android build tools
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018'
+      - uses: actions/cache/restore@v4
+        id: android-cache
+        with:
+          path: ~/.cache/Xbox360Recomp/android
+          key: android-rp6-8dd8b369-clang20-ndk27c-${{ github.run_id }}
+          restore-keys: android-rp6-8dd8b369-clang20-ndk27c-
+      - name: Build and verify library APK
+        run: python xbo360.py android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xbox360Recomp-Android
+          path: dist/android-launcher/Xbox360Recomp-Android.apk
+          if-no-files-found: error
+      - name: Host compiler and runtime build dependencies
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh -O /tmp/llvm-xbo.sh
+          sudo bash /tmp/llvm-xbo.sh 20
+          sudo apt-get install -y clang-20 lld-20 libgtk-3-dev libvulkan-dev ninja-build libx11-dev libx11-xcb-dev libxkbcommon-dev libwayland-dev libpulse-dev libasound2-dev libpipewire-0.3-dev glslc glslang-tools
+      - name: Prepare original test executable
+        run: |
+          python xbo360.py install-sdk --sdk sdk
+          python ci/make_test_xex.py dist/synthetic-game/Default.xex
+          python xbo360.py prepare dist/synthetic-game/Default.xex --project dist/android-fixture --name fixture --sdk sdk
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: dist/android-fixture/android-export
+          key: android-cross-rp6-ndk27c-${{ github.run_id }}
+          restore-keys: android-cross-rp6-ndk27c-
+      - name: Compile synthetic title for Android ARM64 and export signed APK
+        run: python xbo360.py android --project dist/android-fixture --runtime --jobs 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-native-validation
+          path: |
+            dist/android-fixture/android-export/*.apk
+            dist/android-fixture/android-export/*.log
+          if-no-files-found: warn
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.cache/Xbox360Recomp/android
+          key: ${{ steps.android-cache.outputs.cache-primary-key }}
+      - uses: actions/cache/save@v4
+        if: always() && steps.native-cache.outcome == 'success'
+        with:
+          path: dist/android-fixture/android-export
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Xbox360Recomp-Windows-x64
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: Xbox360Recomp-Android
+          path: release
+      - name: Publish versioned update packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v0.3.1 >/dev/null 2>&1 || gh release create v0.3.1 --target "$GITHUB_SHA" --title 'Xbox 360 Recomp 0.3.1' --notes-file CHANGELOG.md
+          gh release upload v0.3.1 release/* --clobber
