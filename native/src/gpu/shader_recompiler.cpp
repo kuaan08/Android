@@ -202,6 +202,8 @@ ShaderEntry* GpuLayer::getOrCompileShader(const uint8_t* microcode, uint32_t siz
 
     if (vkCreateShaderModule(m_device, &smci, nullptr, &entry.vkModule) != VK_SUCCESS) {
         LOGE("SHADER: vkCreateShaderModule failed");
+        m_shadersFailed.fetch_add(1, std::memory_order_relaxed);
+        m_shaderBusy.store(false);
         return nullptr;
     }
 
