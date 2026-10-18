@@ -5,6 +5,7 @@
 #include "../../include/loader/xex_loader.h"
 #include "../../include/loader/stfs_parser.h"
 #include "../../include/loader/iso_parser.h"
+#include "../../include/loader/title_disc.h"
 #include "../../include/jit/jit_engine.h"
 #include "../../include/hle/hle_kernel.h"
 #include "../../include/gpu/gpu_layer.h"
@@ -117,21 +118,9 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
         return -1;
     }
 
-    // listFiles() returns a vector BY VALUE. Never keep a pointer/reference
-    // into that temporary (the old code used a dangling xexEntry).
-    std::optional<x360::IsoFileEntry> xexEntry;
-    for (const auto& file : parser.listFiles()) {
-        if (file.isDirectory) continue;
-        std::string lower = file.name;
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (lower == "default.xex" ||
-            (lower.size() >= 12 &&
-             lower.compare(lower.size() - 12, 12, "/default.xex") == 0)) {
-            xexEntry = file; // Take a VALUE copy before listFiles() is destroyed.
-            break;
-        }
-    }
+    // listFiles() returns a temporary vector. Keep only an owned entry value,
+    // never a pointer into the destroyed temporary.
+    const auto xexEntry = x360::selectDefaultXex(parser.listFiles());
 
     if (!xexEntry) {
         g_lastLoadError = "ISO contains no default.xex executable";
