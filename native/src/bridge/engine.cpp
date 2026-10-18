@@ -179,11 +179,19 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
     }
 
     const uint64_t imageOffset = img.baseAddress - GUEST_BASE;
-    if (g_guestMemory && imageOffset + img.rawMemory.size() <= GUEST_MEM_SIZE) {
-        memcpy(g_guestMemory + imageOffset, img.rawMemory.data(), img.rawMemory.size());
+    if (!g_guestMemory || imageOffset > GUEST_MEM_SIZE ||
+        img.rawMemory.size() > GUEST_MEM_SIZE - imageOffset) {
+        g_lastLoadError = "XEX2 executable memory mapping exceeds guest 4 GiB address space";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -5;
     }
-
-    return g_jitEngine.init(g_guestMemory, GUEST_MEM_SIZE, GUEST_BASE, img.entryPoint) ? 0 : -5;
+    memcpy(g_guestMemory + imageOffset, img.rawMemory.data(), img.rawMemory.size());
+    if (!g_jitEngine.init(g_guestMemory, GUEST_MEM_SIZE, GUEST_BASE, img.entryPoint)) {
+        g_lastLoadError = "ARM64 JIT initialization failed after XEX2 load";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -5;
+    }
+    return 0;
 }
 
 } // namespace bridge
