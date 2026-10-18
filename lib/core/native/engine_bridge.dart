@@ -139,13 +139,13 @@ class EngineBridge {
     _metricsGetRamUsage = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_ram');
     _metricsGetGpuTemp = _lib.lookupFunction<Float Function(), double Function()>('x360_metrics_gpu_temp');
     _metricsGetJitBlocks = _lib.lookupFunction<Int64 Function(), int Function()>('x360_metrics_blocks_compiled');
-    _settingsSetResolution = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('x360_settings_resolution');
-    _settingsSetAf = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_af');
-    _settingsSetAa = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_aa');
-    _settingsSetFpsLimit = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_fps_limit');
-    _settingsSetJitThreads = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_jit_threads');
+    _settingsSetResolution = _lib.lookupFunction<Void Function(Int32, Int32), void Function(int, int)>('x360_settings_set_resolution');
+    _settingsSetAf = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_af');
+    _settingsSetAa = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_aa');
+    _settingsSetFpsLimit = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_fps_limit');
+    _settingsSetJitThreads = _lib.lookupFunction<Void Function(Int32), void Function(int)>('x360_settings_set_jit_threads');
     _inputSetState = _lib.lookupFunction<Void Function(Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32), void Function(int, int, int, int, int, int, int, int)>('x360_input_set_state');
-    _inputSetRumble = _lib.lookupFunction<Void Function(Int32, Int32, Int32), void Function(int, int, int)>('x360_input_rumble');
+    _inputSetRumble = _lib.lookupFunction<Void Function(Int32, Int32, Int32), void Function(int, int, int)>('x360_input_set_rumble');
   }
 
   // ─── Instance API ─────────────────────────────────────────────────────────
