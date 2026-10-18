@@ -171,6 +171,12 @@ int32_t x360_iso_load(const char* path, char* outTitleId, int32_t outLen) {
     // loading default.xex or configuring the JIT. Use the real loader.
     const int32_t result = x360::bridge::loadIsoGame(path, outTitleId, outLen);
     g_titleReady.store(result == 0);
+    if (result != 0) {
+        if (g_lastLoadError.empty())
+            g_lastLoadError = "ISO/XEX2 stage failed with code " +
+                              std::to_string(result) + "; inspect Android logcat";
+        LOGE("ISO/XEX2 load error %d: %s", result, g_lastLoadError.c_str());
+    }
     return result;
 }
 
