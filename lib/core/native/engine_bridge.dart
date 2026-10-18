@@ -216,7 +216,7 @@ class EngineBridge {
     if (!_initialized) return const EngineMetrics();
     return EngineMetrics(
       fps: _metricsGetFps(),
-      frameTimeMs: _metricsGetFrameTime() * 1000,
+      frameTimeMs: _metricsGetFrameTime(),
       cpuUsagePercent: 0, // Not implemented in the native metrics API
       ramUsageBytes: _metricsGetRamUsage(),
       gpuTempCelsius: _metricsGetGpuTemp(),
@@ -226,7 +226,7 @@ class EngineBridge {
 
   // ─── Static convenience shims ─────────────────────────────────────────────
   static double getFps()       => _initialized ? _metricsGetFps() : 0.0;
-  static double getFrameTime() => _initialized ? _metricsGetFrameTime() * 1000 : 0.0;
+  static double getFrameTime() => _initialized ? _metricsGetFrameTime() : 0.0;
   static int getRamUsage()     => _initialized ? _metricsGetRamUsage() : 0;
   static double getGpuTemp()   => _initialized ? _metricsGetGpuTemp() : 0.0;
   static void shutdown() { if (_initialized) { _engineShutdown(); _initialized = false; } }
