@@ -220,7 +220,8 @@ bool IsoParser::extractFile(const IsoFileEntry& entry,const std::string& destina
        entry.size>m_fileSize-entry.offset) return false;
     std::ofstream output(destination,std::ios::binary|std::ios::trunc);
     if(!output) {m_lastError="Cannot create extraction output";return false;}
-    std::array<uint8_t,1024*1024> buffer{};
+    // Heap buffer: Android JNI worker threads may have a 1 MiB stack limit.
+    std::vector<uint8_t> buffer(64 * 1024);
     uint64_t at=entry.offset,remaining=entry.size;
     while(remaining) {
         const size_t chunk=static_cast<size_t>(std::min<uint64_t>(remaining,buffer.size()));
