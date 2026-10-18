@@ -70,7 +70,8 @@ public final class LauncherActivity extends Activity {
                 });
             } catch (Exception e) { text("Unreadable library entry: " + root.getName(),13,Color.RED); }
         }
-        button("Updates", () -> startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse("https://github.com/kuaan08/xbo360/releases/latest"))));
+        button("Device diagnostics (copy)", this::showDiagnostics);
+        button("Updates", () -> startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse("https://github.com/kuaan08/Android/releases/latest"))));
         button("About / credits", () -> message("Xbox 360 Recomp 0.3.1\nFork: katakishi0 · hosted by kuaan08\nSwitchRecomp by MZ Labs\nReXGlue by Tom Clay and contributors\nAndroid runtime: AlanConstantino, Andrew Nakas, Buku313 and contributors\nNo commercial-game compatibility is established by the synthetic build tests."));
         if (metadata.optBoolean("native")) text("ARM64 · Android 13+ · Vulkan · physical gamepad recommended",13,0xff9ca5b2);
     }
@@ -78,6 +79,51 @@ public final class LauncherActivity extends Activity {
     TextView text(String value,int size,int color) { TextView t=new TextView(this);t.setText(value);t.setTextSize(size);t.setTextColor(color);t.setPadding(0,8,0,10);content.addView(t);return t; }
     void button(String title,Runnable action) { Button b=new Button(this);b.setText(title);b.setAllCaps(false);b.setTextColor(Color.WHITE);b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xff24321e));content.addView(b);b.setOnClickListener(v->{if(!busy)action.run();}); }
     void message(String value){new AlertDialog.Builder(this).setTitle("Xbox 360 Recomp").setMessage(value).setPositiveButton("OK",null).show();}
+    
+    /** Copy a privacy-conscious hardware/build report to help diagnose phone-only failures. */
+    void showDiagnostics() {
+        StringBuilder info = new StringBuilder("Xbox 360 Recomp Android diagnostics\n");
+        info.append("Android: ").append(Build.VERSION.RELEASE)
+            .append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
+        info.append("ABIs: ").append(Arrays.toString(Build.SUPPORTED_ABIS)).append('\n');
+        info.append("Vulkan feature advertised: ")
+            .append(getPackageManager().hasSystemFeature("android.hardware.vulkan.version")).append('\n');
+        info.append("Package: ").append(getPackageName()).append('\n');
+        info.append("Native title APK: ").append(metadata.optBoolean("native")).append('\n');
+        File libDir = new File(getApplicationInfo().nativeLibraryDir);
+        info.append("Game library packaged: ")
+            .append(new File(libDir, "libxbo_game.so").isFile()).append('\n');
+        info.append("ReXGlue runtime packaged: ")
+            .append(new File(libDir, "librexruntime.so").isFile()).append('\n');
+        info.append("On-device codegen loaded: ").append(codegenReady).append('\n');
+        if (codegenError != null) info.append("Codegen error: ").append(codegenError).append('\n');
+        if (library != null) {
+            info.append("Free game storage MiB: ").append(library.getUsableSpace() / (1024 * 1024)).append('\n');
+            File[] games = library.listFiles(f -> f.isDirectory() && new File(f, "xbo-game.json").isFile());
+            info.append("Imported library entries: ").append(games == null ? "unavailable" : games.length).append('\n');
+        }
+        ActivityManager manager = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        if (manager != null) {
+            ActivityManager.MemoryInfo mem = new ActivityManager.MemoryInfo();
+            manager.getMemoryInfo(mem);
+            info.append("Device RAM MiB (total/available): ")
+                .append(mem.totalMem / (1024 * 1024)).append('/')
+                .append(mem.availMem / (1024 * 1024)).append('\n');
+        }
+        info.append("Java heap max MiB: ")
+            .append(Runtime.getRuntime().maxMemory() / (1024 * 1024)).append('\n');
+        info.append("Note: feature flags and APK files do not prove Vulkan or game compatibility.");
+        final String report = info.toString();
+        new AlertDialog.Builder(this).setTitle("Device diagnostics").setMessage(report)
+            .setPositiveButton("Copy", (dialog, which) -> {
+                android.content.ClipboardManager clipboard =
+                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Xbox 360 Recomp diagnostics", report));
+                    Toast.makeText(this, "Diagnostics copied", Toast.LENGTH_SHORT).show();
+                }
+            }).setNegativeButton("Close", null).show();
+    }
 
     void pick(boolean folder) {
         Intent i=new Intent(folder?Intent.ACTION_OPEN_DOCUMENT_TREE:Intent.ACTION_OPEN_DOCUMENT);
