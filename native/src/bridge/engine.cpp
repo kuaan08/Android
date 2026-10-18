@@ -5,12 +5,17 @@
 #include "../../include/loader/xex_loader.h"
 #include "../../include/loader/stfs_parser.h"
 #include "../../include/loader/iso_parser.h"
+#include "../../include/loader/title_disc.h"
 #include "../../include/jit/jit_engine.h"
 #include "../../include/hle/hle_kernel.h"
 #include "../../include/gpu/gpu_layer.h"
 #include <android/log.h>
 #include <string>
 #include <filesystem>
+#include <optional>
+#include <fstream>
+#include <cstring>
+#include <algorithm>
 #include <sys/mman.h>
 
 #define LOG_TAG "X360:ENGINE"
@@ -113,36 +118,58 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
         return -1;
     }
 
-    // Find default.xex
-    const x360::IsoFileEntry* xexEntry = nullptr;
-    for (const auto& f : parser.listFiles()) {
-        std::string lower = f.name;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        if (lower.find("default.xex") != std::string::npos) {
-            xexEntry = &f;
-            break;
-        }
-    }
+    // listFiles() returns a temporary vector. Keep only an owned entry value,
+    // never a pointer into the destroyed temporary.
+    const auto xexEntry = x360::selectDefaultXex(parser.listFiles());
 
     if (!xexEntry) {
         g_lastLoadError = "ISO contains no default.xex executable";
-        LOGE("ENGINE: default.xex not found in ISO");
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
         return -2;
     }
-
-    // Extract to temp
-    std::string xexPath = g_gameDir + "/.iso_extract/default.xex";
-    fs::create_directories(g_gameDir + "/.iso_extract");
-    if (!parser.extractFile(*xexEntry, xexPath)) {
-        g_lastLoadError = "Could not extract default.xex from ISO";
-        LOGE("ENGINE: ISO extract failed");
+    if (xexEntry->size < 24 || xexEntry->size > 512U * 1024U * 1024U) {
+        g_lastLoadError = "ISO default.xex entry size is invalid or exceeds the 512 MiB limit";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
         return -3;
     }
 
-    // Load XEX
-    x360::XexImage img;
+    // Extract into private app storage; do not retain dangling ISO entry data.
+    const fs::path directory = fs::path(g_gameDir) / ".iso_extract";
+    std::error_code directoryError;
+    fs::create_directories(directory, directoryError);
+    if (directoryError) {
+        g_lastLoadError = "Could not create private XEX extraction directory: " +
+                          directoryError.message();
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -3;
+    }
+    const std::string xexPath = (directory / "default.xex").string();
+    if (!parser.extractFile(*xexEntry, xexPath)) {
+        g_lastLoadError = "Could not extract default.xex from ISO: " + parser.lastError();
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -3;
+    }
+
+    // A supposedly extracted XEX with a different magic indicates bad disc
+    // offsets/entry parsing, not unsupported PPC instructions.
+    std::ifstream extracted(xexPath, std::ios::binary);
+    char magic[4]{};
+    if (!extracted.read(magic, sizeof(magic)) ||
+        std::memcmp(magic, "XEX2", sizeof(magic)) != 0) {
+        g_lastLoadError =
+            "Extracted default.xex is not XEX2 (invalid magic). "
+            "ISO directory offsets or disc format may be incorrect.";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -4;
+    }
+    extracted.close();
+
+    x360::XexImage img{};
     if (!g_xexLoader.load(xexPath, img)) {
-        LOGE("ENGINE: XEX load failed: %s", g_xexLoader.lastError().c_str());
+        g_lastLoadError = g_xexLoader.lastError();
+        if (g_lastLoadError.empty())
+            g_lastLoadError = "XEX2 loader failed without an internal reason";
+        LOGE("ENGINE: XEX load failed: %s", g_lastLoadError.c_str());
         return -4;
     }
 
@@ -152,11 +179,19 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
     }
 
     const uint64_t imageOffset = img.baseAddress - GUEST_BASE;
-    if (g_guestMemory && imageOffset + img.rawMemory.size() <= GUEST_MEM_SIZE) {
-        memcpy(g_guestMemory + imageOffset, img.rawMemory.data(), img.rawMemory.size());
+    if (!g_guestMemory || imageOffset > GUEST_MEM_SIZE ||
+        img.rawMemory.size() > GUEST_MEM_SIZE - imageOffset) {
+        g_lastLoadError = "XEX2 executable memory mapping exceeds guest 4 GiB address space";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -5;
     }
-
-    return g_jitEngine.init(g_guestMemory, GUEST_MEM_SIZE, GUEST_BASE, img.entryPoint) ? 0 : -5;
+    memcpy(g_guestMemory + imageOffset, img.rawMemory.data(), img.rawMemory.size());
+    if (!g_jitEngine.init(g_guestMemory, GUEST_MEM_SIZE, GUEST_BASE, img.entryPoint)) {
+        g_lastLoadError = "ARM64 JIT initialization failed after XEX2 load";
+        LOGE("ENGINE: %s", g_lastLoadError.c_str());
+        return -5;
+    }
+    return 0;
 }
 
 } // namespace bridge
