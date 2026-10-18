@@ -165,6 +165,7 @@ private:
     VkFence     m_inFlightFence  = VK_NULL_HANDLE;
     uint32_t    m_graphicsQueueFamily = 0;
     VkExtent2D  m_swapExtent{};
+    VkFormat m_swapFormat = VK_FORMAT_UNDEFINED;
 
     uint8_t*  m_guestMemory = nullptr;
     uint64_t  m_guestBase   = 0;
