@@ -41,13 +41,16 @@ class AndroidPackageToolTests(unittest.TestCase):
             }
             with patch.dict(os.environ, environment):
                 _, tools = BUILD.tools(sdk)
-            self.assertEqual(tools["android"], paths["android.jar"])
-            self.assertEqual(tools["aapt2"], paths["aapt2"])
-            self.assertEqual(tools["zipalign"], paths["zipalign"])
-            self.assertEqual(tools["d8"], paths["d8.jar"])
-            self.assertEqual(tools["apksigner"], paths["apksigner.jar"])
+            # Windows can return a long canonical path for an 8.3 temp alias
+            # (RUNNER~1 vs runneradmin). Compare file identity, not spelling.
+            for name, expected in (("android", paths["android.jar"]),
+                                   ("aapt2", paths["aapt2"]),
+                                   ("zipalign", paths["zipalign"]),
+                                   ("d8", paths["d8.jar"]),
+                                   ("apksigner", paths["apksigner.jar"])):
+                self.assertTrue(os.path.samefile(tools[name], expected), name)
             for name in ("java", "javac", "keytool"):
-                self.assertEqual(tools[name], jdk_tools[name])
+                self.assertTrue(os.path.samefile(tools[name], jdk_tools[name]), name)
 
 
 if __name__ == "__main__":
