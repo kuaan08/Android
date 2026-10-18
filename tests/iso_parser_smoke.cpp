@@ -44,6 +44,7 @@ void fixture(const std::filesystem::path& path,uint64_t base,bool truncate=false
     write(base+32*kSector,header.data(),header.size());
     write(base+33*kSector,tree.data(),tree.size());
     write(base+34*kSector,xex.data(),xex.size());
+    assert(std::fflush(f)==0);
     if (truncate) {
         assert(ftruncate(fileno(f),static_cast<off_t>(base+34*kSector+12))==0);
     }
