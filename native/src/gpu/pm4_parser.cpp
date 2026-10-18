@@ -36,6 +36,7 @@ static inline uint32_t pm4Type0Count(uint32_t header) {
 void GpuLayer::processPm4RingBuffer(const uint32_t* ringBuf, uint32_t sizeWords) {
     uint32_t i = 0;
     while (i < sizeWords) {
+        m_pm4Packets.fetch_add(1, std::memory_order_relaxed);
         uint32_t header = __builtin_bswap32(ringBuf[i]);
         Pm4PacketType type = pm4Type(header);
 
