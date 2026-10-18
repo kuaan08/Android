@@ -51,6 +51,8 @@ class EngineBridge {
   static late int Function(Pointer<Utf8> path, Pointer<Utf8> outTitleId, int outLen) _stfsLoad;
   static late int Function(Pointer<Utf8> path, Pointer<Utf8> outTitleId, int outLen) _isoLoad;
   static late void Function() _gameUnload;
+  static late int Function(Pointer<Uint8> out, int length) _getLoadError;
+  static String lastLoadError = '';
   static late int Function(int threadCount) _jitStart;
   static late void Function() _jitStop;
   static late int Function() _jitGetState;
@@ -127,6 +129,9 @@ class EngineBridge {
     _stfsLoad = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('x360_stfs_load');
     _isoLoad = _lib.lookupFunction<Int32 Function(Pointer<Utf8>, Pointer<Utf8>, Int32), int Function(Pointer<Utf8>, Pointer<Utf8>, int)>('x360_iso_load');
     _gameUnload = _lib.lookupFunction<Void Function(), void Function()>('x360_game_unload');
+    _getLoadError = _lib.lookupFunction<
+        Int32 Function(Pointer<Uint8>, Int32),
+        int Function(Pointer<Uint8>, int)>('x360_last_load_error');
     _jitStart = _lib.lookupFunction<Int32 Function(Int32), int Function(int)>('x360_jit_start');
     _jitStop = _lib.lookupFunction<Void Function(), void Function()>('x360_jit_stop');
     _jitGetState = _lib.lookupFunction<Int32 Function(), int Function()>('x360_jit_get_state');
@@ -150,16 +155,33 @@ class EngineBridge {
 
   // ─── Instance API ─────────────────────────────────────────────────────────
   int loadGame(String path, GameFormat format) {
-    if (!_initialized) return -1;
+    lastLoadError = '';
+    if (!_initialized) {
+      lastLoadError = _initializationError ?? 'Native engine is not initialized';
+      return -1;
+    }
     final pathPtr = path.toNativeUtf8();
     final titleBuf = calloc<Uint8>(64).cast<Utf8>();
     try {
-      return switch (format) {
+      final result = switch (format) {
         GameFormat.xex  => _xexLoad(pathPtr, titleBuf, 64),
         GameFormat.stfs => _stfsLoad(pathPtr, titleBuf, 64),
         GameFormat.iso  => _isoLoad(pathPtr, titleBuf, 64),
         _               => _xexLoad(pathPtr, titleBuf, 64),
       };
+      if (result != 0) {
+        final errorBuf = calloc<Uint8>(1024);
+        try {
+          _getLoadError(errorBuf, 1024);
+          lastLoadError = errorBuf.cast<Utf8>().toDartString();
+          if (lastLoadError.isEmpty) {
+            lastLoadError = 'Native loader returned code $result without details';
+          }
+        } finally {
+          calloc.free(errorBuf);
+        }
+      }
+      return result;
     } finally {
       calloc.free(pathPtr);
       calloc.free(titleBuf);
