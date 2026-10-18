@@ -26,6 +26,7 @@ extern x360::gpu::GpuLayer      g_gpuLayer;
 extern uint8_t*                  g_guestMemory;
 extern std::string               g_gameDir;
 extern std::string               g_saveDir;
+extern std::string               g_lastLoadError;
 
 static constexpr uint64_t GUEST_BASE     = 0x00000000ULL;
 static constexpr size_t   GUEST_MEM_SIZE = 0x100000000ULL;
@@ -44,7 +45,8 @@ int32_t loadStfsGame(const char* path, char* outTitleId, int32_t outLen) {
     x360::StfsPackage pkg;
 
     if (!parser.open(path, pkg)) {
-        LOGE("ENGINE: STFS open failed: %s", parser.lastError().c_str());
+        g_lastLoadError = parser.lastError();
+        LOGE("ENGINE: STFS open failed: %s", g_lastLoadError.c_str());
         return -1;
     }
 
@@ -55,6 +57,7 @@ int32_t loadStfsGame(const char* path, char* outTitleId, int32_t outLen) {
     std::string extractDir = g_gameDir + "/.stfs_extract/" + pkg.titleId;
     int extracted = parser.extractAll(path, extractDir, pkg);
     if (extracted < 0) {
+        g_lastLoadError = "STFS package extraction failed";
         LOGE("ENGINE: STFS extract failed");
         return -2;
     }
@@ -71,6 +74,7 @@ int32_t loadStfsGame(const char* path, char* outTitleId, int32_t outLen) {
     }
 
     if (xexPath.empty()) {
+        g_lastLoadError = "No default.xex was found in STFS package";
         LOGE("ENGINE: default.xex not found in STFS package");
         return -3;
     }
@@ -78,7 +82,8 @@ int32_t loadStfsGame(const char* path, char* outTitleId, int32_t outLen) {
     // Now load the XEX
     x360::XexImage img;
     if (!g_xexLoader.load(xexPath, img)) {
-        LOGE("ENGINE: XEX load failed: %s", g_xexLoader.lastError().c_str());
+        g_lastLoadError = g_xexLoader.lastError();
+        LOGE("ENGINE: XEX load failed: %s", g_lastLoadError.c_str());
         return -4;
     }
 
@@ -103,7 +108,8 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
 
     x360::IsoParser parser;
     if (!parser.open(path)) {
-        LOGE("ENGINE: ISO open failed: %s", parser.lastError().c_str());
+        g_lastLoadError = parser.lastError();
+        LOGE("ENGINE: ISO open failed: %s", g_lastLoadError.c_str());
         return -1;
     }
 
@@ -119,6 +125,7 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
     }
 
     if (!xexEntry) {
+        g_lastLoadError = "ISO contains no default.xex executable";
         LOGE("ENGINE: default.xex not found in ISO");
         return -2;
     }
@@ -127,6 +134,7 @@ int32_t loadIsoGame(const char* path, char* outTitleId, int32_t outLen) {
     std::string xexPath = g_gameDir + "/.iso_extract/default.xex";
     fs::create_directories(g_gameDir + "/.iso_extract");
     if (!parser.extractFile(*xexEntry, xexPath)) {
+        g_lastLoadError = "Could not extract default.xex from ISO";
         LOGE("ENGINE: ISO extract failed");
         return -3;
     }
