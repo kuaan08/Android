@@ -70,7 +70,8 @@ struct AesState {
 // Key expansion
 static void keyExpand(const uint8_t* key, uint32_t* w) {
     for (int i = 0; i < 4; i++) {
-        w[i] = (key[4*i]<<24)|(key[4*i+1]<<16)|(key[4*i+2]<<8)|key[4*i+3];
+        w[i] = (uint32_t(key[4*i])<<24)|(uint32_t(key[4*i+1])<<16)|
+               (uint32_t(key[4*i+2])<<8)|uint32_t(key[4*i+3]);
     }
     for (int i = 4; i < 44; i++) {
         uint32_t t = w[i-1];
