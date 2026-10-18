@@ -10,6 +10,8 @@
  * Unsupported formats must NEVER be treated as ready-to-execute machine code.
  */
 #include "../../include/loader/xex_loader.h"
+#include "../../include/loader/aes128.h"
+#include <array>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -35,6 +37,14 @@ constexpr uint32_t kFileFormat = 0x000003FF;
 constexpr uint32_t kImports = 0x000103FF;
 constexpr size_t kMaxXexBytes = 512ULL * 1024 * 1024;
 constexpr uint64_t kGuestSize = 0x100000000ULL;
+// Public XEX2 retail master key used by Xenia and other Xbox 360
+// tooling. It unwraps the per-title AES image key in the security header.
+// Source reference: xenia/src/xenia/cpu/xex_module.cc (BSD license).
+constexpr std::array<uint8_t,16> kXex2RetailKey{{
+    0x20, 0xB1, 0x85, 0xA5, 0x9D, 0x28, 0xFD, 0xC3,
+    0x40, 0x58, 0x3F, 0xBB, 0x08, 0x96, 0xBF, 0x91,
+}};
+constexpr size_t kXex2WrappedKeyOffset = 0x150;
 
 // No reinterpret_cast reads of unaligned guest big-endian structures.
 uint16_t read16(const uint8_t* p) {
@@ -96,7 +106,8 @@ bool XexLoader::parseHeader(const std::vector<uint8_t>& raw, XexImage& img) {
     const uint32_t count = read32(raw.data() + 20);
     if (count > 4096 || !within(raw.size(), 24, uint64_t(count) * 8) ||
         headerSize < 24 + uint64_t(count) * 8 || headerSize >= raw.size() ||
-        !within(raw.size(), securityOffset, 0x184)) {
+        !within(raw.size(), securityOffset, 0x184) ||
+        uint64_t(securityOffset) + 0x184 > headerSize) {
         m_lastError = "XEX2 header directory or security information is truncated";
         return false;
     }
@@ -182,11 +193,41 @@ bool XexLoader::parseHeader(const std::vector<uint8_t>& raw, XexImage& img) {
     return true;
 }
 
-bool XexLoader::decryptSections(std::vector<uint8_t>&, XexImage& image) {
+bool XexLoader::decryptSections(std::vector<uint8_t>& data, XexImage& image) {
     if (image.header.encryptionType == XexEncryptionType::None) return true;
-    // Never pass encrypted code through as valid PPC instructions.
-    m_lastError = "XEX2 uses encrypted executable data (AES); decryption is not implemented";
-    return false;
+    if (image.header.encryptionType != XexEncryptionType::Normal) {
+        m_lastError = "XEX2 uses an unsupported encryption type";
+        return false;
+    }
+
+    // XEX2 security_info.aes_key is at security_offset + 0x150.
+    // AES-128-ECB under the XEX2 retail master key unwraps a 16-byte
+    // session key. The image payload is AES-128-CBC with an all-zero IV.
+    const uint64_t wrappedOffset =
+        uint64_t(image.header.securityOffset) + kXex2WrappedKeyOffset;
+    if (!within(data.size(), wrappedOffset, 16) ||
+        wrappedOffset + 16 > image.header.sizeOfHeaders) {
+        m_lastError = "XEX2 security AES key is outside the executable header";
+        return false;
+    }
+    const size_t payloadStart = image.header.sizeOfHeaders;
+    if (payloadStart >= data.size() || (data.size() - payloadStart) % 16 != 0) {
+        m_lastError =
+            "XEX2 encrypted image length is not a multiple of AES block size (16)";
+        return false;
+    }
+
+    std::array<uint8_t,16> sessionKey{};
+    Aes128::ecbDecrypt(kXex2RetailKey.data(),
+                       data.data() + wrappedOffset, sessionKey.data());
+    std::array<uint8_t,16> iv{};
+    Aes128::cbcDecrypt(sessionKey.data(), iv.data(),
+                       data.data() + payloadStart, data.size() - payloadStart);
+    std::fill(sessionKey.begin(), sessionKey.end(), uint8_t(0));
+    std::fill(iv.begin(), iv.end(), uint8_t(0));
+    LOGI("XEX2 retail AES-128 payload decryption stage completed (%zu bytes)",
+         data.size() - payloadStart);
+    return true;
 }
 
 bool XexLoader::decompressSections(std::vector<uint8_t>& data, XexImage& image) {
@@ -231,7 +272,9 @@ bool XexLoader::decompressSections(std::vector<uint8_t>& data, XexImage& image) 
     // LZX may require block chaining, window restoration and AES first.
     // A fake successful decompression is more harmful than a precise error.
     m_lastError = (compression == XexCompressionType::Normal)
-        ? "XEX2 uses LZX (normal) compression; full decompression is not implemented"
+        ? (image.header.encryptionType == XexEncryptionType::Normal
+            ? "XEX2 AES stage completed; LZX (normal) decompression remains unsupported"
+            : "XEX2 uses LZX (normal) compression; full decompression is not implemented")
         : "XEX2 uses DELTA compression; delta patching is not implemented";
     return false;
 }
@@ -250,8 +293,16 @@ bool XexLoader::mapToVirtualMemory(XexImage& img) {
         m_lastError = "XEX2 image exceeds the guest address space";
         return false;
     }
-    // PE section alignment and relocations are still experimental. A valid
-    // XEX2 parser result alone does not demonstrate playable execution.
+    // A successful AES operation without padding does not authenticate the
+    // plaintext. Verify the PE image signature before passing bytes to JIT.
+    if (img.rawMemory.size() < 2 || img.rawMemory[0] != 'M' ||
+        img.rawMemory[1] != 'Z') {
+        m_lastError = "Decrypted XEX2 payload is not a valid PE image (MZ). "
+                      "The XEX may use a different key, be corrupt, or require "
+                      "a different compression format.";
+        return false;
+    }
+    // Full PE section/relocation/import mapping still needs implementation.
     return true;
 }
 } // namespace x360
