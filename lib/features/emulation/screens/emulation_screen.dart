@@ -290,8 +290,9 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
                  _nativeMetrics.pm4DrawAttempts == 0))
               Positioned(
                 top: 14,
-                right: 15,
-                child: ConstrainedBox(
+                left: 310,
+                right: 155,
+                child: Center(child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 360),
                   child: Container(
                     padding: const EdgeInsets.all(12),
@@ -323,7 +324,7 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
                       ],
                     ),
                   ),
-                ),
+                )),
               ),
 
             // Touch controls
