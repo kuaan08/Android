@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
@@ -24,7 +25,7 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
   int _fpsLimit = 0;
 
   // CPU
-  int _jitThreads = 4;
+  int _jitThreads = 2; // Default conservative for 6 GB RAM
   int _jitMode = 0; // 0=Lazy 1=Eager
   bool _blockCache = true;
   bool _fastMath = true;
@@ -36,7 +37,8 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
   bool _audioStretch = false;
 
   // Driver
-  int _driverMode = 0; // 0=System 1=Turnip
+  int _driverMode = 0; // Only system driver is actually wired into Vulkan
+  bool _showDiagnostics = true;
   bool _bcNative = true;
   bool _debugLayers = false;
 
@@ -44,6 +46,7 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
   void initState() {
     super.initState();
     _tabs = TabController(length: 4, vsync: this);
+    _loadPrefs();
   }
 
   @override
@@ -101,15 +104,36 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
     );
   }
 
-  void _saveSettings() {
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _jitThreads = (prefs.getInt('game_${widget.titleId}_jit_threads') ?? 2).clamp(1, 6);
+      _showDiagnostics = prefs.getBool('game_${widget.titleId}_gpu_diagnostics') ?? true;
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('game_${widget.titleId}_jit_threads', _jitThreads);
+    await prefs.setBool('game_${widget.titleId}_gpu_diagnostics', _showDiagnostics);
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Settings saved')),
+      const SnackBar(content: Text(
+        'Saved JIT threads and GPU diagnostics. Other graphics, audio and driver '
+        'controls are not yet implemented by this experimental runtime.',
+      ), duration: Duration(seconds: 6)),
     );
     context.pop();
   }
 
   Widget _graphicsTab() {
     return ListView(padding: const EdgeInsets.all(16), children: [
+      const ListTile(
+        title: Text('Experimental renderer', style: TextStyle(color: Colors.amber)),
+        subtitle: Text('Graphics controls below are not applied to the native Vulkan backend yet.',
+            style: TextStyle(color: Colors.white54)),
+      ),
       _Section('Internal Resolution'),
       _Card(children: [
         Padding(
@@ -170,6 +194,13 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
 
   Widget _cpuTab() {
     return ListView(padding: const EdgeInsets.all(16), children: [
+      _Section('Native runtime settings'),
+      _Card(children: [
+        _SwitchRow('GPU / shader diagnostics',
+          'Show real Vulkan, PM4 and compilation status while playing',
+          _showDiagnostics, (v) => setState(() => _showDiagnostics = v)),
+      ]),
+      const SizedBox(height: 12),
       _Section('JIT Threads (1–6)'),
       _Card(children: [
         Padding(
@@ -185,7 +216,8 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
               label: '$_jitThreads',
               onChanged: (v) => setState(() => _jitThreads = v.round()),
             ),
-            const Text('Higher values improve performance on multi-core devices.',
+            const Text('Applied on next Play. For 6 GB RAM start with 1–2 threads. '
+              'More threads do not guarantee higher FPS.',
               style: TextStyle(fontSize: 11, color: Colors.white38)),
           ]),
         ),
@@ -226,7 +258,18 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
   Widget _driverTab() {
     return ListView(padding: const EdgeInsets.all(16), children: [
       _Section('Vulkan Driver'),
-      _SegmentedCard(['System', 'Turnip (Mesa)'], _driverMode, (v) => setState(() => _driverMode = v)),
+      const _DriverWarning(),
+      _SegmentedCard(['System', 'Turnip (unavailable)'], _driverMode, (v) {
+        if (v == 1) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Turnip is not yet usable: the Android Vulkan path '
+              'requires a proper libadrenotools loader and validation. '
+              'Selecting a label does not change the driver.'),
+            duration: Duration(seconds: 8)));
+        } else {
+          setState(() => _driverMode = 0);
+        }
+      }),
       if (_driverMode == 1)
         Padding(
           padding: const EdgeInsets.only(top: 8),
@@ -316,6 +359,22 @@ class _GameSettingsScreenState extends ConsumerState<GameSettingsScreen>
       onTap: () => onChanged(!value),
     );
   }
+}
+
+class _DriverWarning extends StatelessWidget {
+  const _DriverWarning();
+  @override
+  Widget build(BuildContext context) => const Padding(
+    padding: EdgeInsets.all(12),
+    child: Text(
+      'Active backend: Android system Vulkan driver. '
+      'Turnip ZIP installation and libadrenotools Vulkan routing are NOT '
+      'implemented in this build. Installing a separate driver app does not '
+      'automatically replace the Vulkan driver used here. '
+      'The Xbox 360 shader translator and draw commands are also incomplete.',
+      style: TextStyle(color: Colors.amber, fontSize: 12),
+    ),
+  );
 }
 
 Widget _IntField(String label, int value, ValueChanged<int> onChanged, int min, int max) {
