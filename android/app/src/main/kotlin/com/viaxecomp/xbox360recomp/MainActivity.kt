@@ -37,6 +37,8 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        flutterEngine.platformViewsController.registry.registerViewFactory(
+            "xbox360recomp/game_surface", EmulationSurfaceFactory())
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, engineChannel).setMethodCallHandler { call, result ->
             when (call.method) {
                 "getSupportedAbis" -> result.success(Build.SUPPORTED_ABIS.toList())
