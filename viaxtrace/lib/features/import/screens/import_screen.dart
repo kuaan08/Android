@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:go_router/go_router.dart';
@@ -114,7 +116,7 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
           ),
           const SizedBox(height: 20),
           Text(
-            importState.currentStep,
+            importState.isImporting ? importState.currentStep : 'Waiting for Android document provider...',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
             textAlign: TextAlign.center,
           ),
@@ -176,46 +178,86 @@ class _ImportScreenState extends ConsumerState<ImportScreen> {
   }
 
   Future<void> _pickFile(List<String>? extensions, GameFormat format) async {
-    final result = await FilePicker.platform.pickFiles(
-      type: extensions != null ? FileType.custom : FileType.any,
-      allowedExtensions: extensions,
-      dialogTitle: 'Select Xbox 360 game file',
-    );
-    if (result == null || result.files.isEmpty) return;
-    final path = result.files.first.path;
-    if (path == null) return;
+    if (_importing) return;
+    String? path;
+    String? fileName;
+    String? digest;
+    int? size;
+    bool ownedStaging = false;
 
-    setState(() => _importing = true);
     try {
-      final game = await ref.read(importProvider.notifier).importGame(path, format);
-      if (game != null && mounted) {
-        await ref.read(libraryProvider.notifier).addGame(game);
-        if (mounted) {
-          setState(() => _importing = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('${game.title} imported successfully'),
-              action: SnackBarAction(
-                label: 'Play',
-                onPressed: () => context.push('/emulation/${game.titleId}'),
-              ),
-            ),
-          );
-          context.go('/');
+      if (format == GameFormat.iso && Platform.isAndroid) {
+        // Android's Storage Access Framework gives content:// URIs, not
+        // reliable file paths. Native Kotlin streams the ISO into private
+        // app storage in 1 MiB chunks, never buffering an entire disc in RAM.
+        setState(() => _importing = true);
+        final payload = await const MethodChannel(
+          'com.viaxecomp.xbox360recomp/import',
+        ).invokeMapMethod<String, dynamic>('pickIso');
+        if (payload == null) return;
+        path = payload['path'] as String?;
+        fileName = payload['name'] as String?;
+        digest = payload['sha256'] as String?;
+        size = (payload['size'] as num?)?.toInt();
+        ownedStaging = true;
+        if (path == null || path.isEmpty) {
+          throw const FormatException('Android did not provide a readable ISO');
         }
-      } else if (mounted) {
-        setState(() => _importing = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Import failed. Check that the file is a valid Xbox 360 game.')),
+      } else {
+        // Avoid extension-filter failures for vendor document providers.
+        final selected = await FilePicker.platform.pickFiles(
+          type: FileType.any,
+          allowMultiple: false,
+          withData: false,
+          dialogTitle: 'Select Xbox 360 game file',
         );
+        if (selected == null || selected.files.isEmpty) return;
+        final item = selected.files.first;
+        path = item.path;
+        fileName = item.name;
+        if (path == null || path.isEmpty) {
+          throw const FileSystemException(
+            'The Android file provider did not return a usable file path. '
+            'Choose a locally stored file instead.');
+        }
+        if (extensions != null &&
+            !extensions.any((ext) => item.name.toLowerCase().endsWith('.' + ext))) {
+          throw FormatException('Please select a file ending in ' + extensions.join(', '));
+        }
       }
+      if (!mounted) return;
+      setState(() => _importing = true);
+      final game = await ref.read(importProvider.notifier).importGame(
+        path, format,
+        originalName: fileName,
+        precomputedSha256: digest,
+        knownSize: size,
+        ownedStagingFile: ownedStaging,
+      );
+      if (!mounted) return;
+      if (game == null) {
+        final error = ref.read(importProvider).error ?? 'Unknown import error';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Import failed: ' + error),
+          duration: const Duration(seconds: 10),
+        ));
+        return;
+      }
+      await ref.read(libraryProvider.notifier).addGame(game);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(game.title + ' imported. Gameplay is not yet verified.'),
+        duration: const Duration(seconds: 6),
+      ));
+      context.go('/');
     } catch (e) {
-      if (mounted) {
-        setState(() => _importing = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Import error: $e')),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Import error: ' + e.toString()),
+        duration: const Duration(seconds: 10),
+      ));
+    } finally {
+      if (mounted) setState(() => _importing = false);
     }
   }
 }
