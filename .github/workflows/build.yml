@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: viaxtrace-${ github.workflow }}-${ github.ref }}
+  group: viaxtrace-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -54,9 +54,9 @@ jobs:
             ~/.gradle/wrapper
             ~/.pub-cache
             android/.cxx
-          key: viax-android-${ runner.os }}-${ hashFiles('pubspec.yaml', 'android/**/*.gradle', 'native/**/*.cpp', 'native/**/*.h') }}
+          key: viax-android-${{ runner.os }}-${{ hashFiles('pubspec.yaml', 'android/**/*.gradle', 'native/**/*.cpp', 'native/**/*.h') }}
           restore-keys: |
-            viax-android-${ runner.os }}-
+            viax-android-${{ runner.os }}-
       - name: Fetch Flutter dependencies
         run: flutter pub get
       - name: Generate Riverpod / Freezed / Hive sources
