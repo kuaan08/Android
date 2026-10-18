@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/native/engine_bridge.dart';
@@ -22,6 +23,9 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
     with WidgetsBindingObserver {
   bool _showControls = true;
   bool _showMetrics = true;
+  bool _showDiagnostics = true;
+  EngineMetrics _nativeMetrics = const EngineMetrics();
+  Timer? _diagnosticTimer;
   bool _showMenu = false;
   bool _isRunning = false;
   bool _isPaused = false;
@@ -40,6 +44,7 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
 
   @override
   void dispose() {
+    _diagnosticTimer?.cancel();
     _playtimeTimer?.cancel();
     _menuHideTimer?.cancel();
     _stopEmulation();
@@ -84,7 +89,14 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
         return;
       }
       final game = matches.first;
-      setState(() => _statusMessage = 'Initializing native runtime…');
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      final jitThreads = (prefs.getInt('game_${widget.titleId}_jit_threads') ?? 2).clamp(1, 6);
+      setState(() {
+        _showMetrics = prefs.getBool('global_overlay') ?? true;
+        _showDiagnostics = prefs.getBool('game_${widget.titleId}_gpu_diagnostics') ?? true;
+        _statusMessage = 'Initializing native runtime…';
+      });
       await EngineBridge.initialize(gameDirectory: game.installDir);
       if (!mounted) return;
       if (!EngineBridge.isAvailable) {
@@ -105,19 +117,25 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
       }
 
       setState(() => _statusMessage = 'Starting JIT engine…');
-      result = bridge.startJit(4);
+      result = bridge.startJit(jitThreads);
       if (result != 0) {
         if (mounted) _showError('JIT engine failed to start (error $result)');
         return;
       }
 
       setState(() {
-        _statusMessage = 'Running';
+        _statusMessage = 'JIT started; waiting for real GPU frames';
         _isRunning = true;
       });
 
       _playtimeTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         _sessionSeconds++;
+      });
+      _diagnosticTimer?.cancel();
+      _diagnosticTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted || !_isRunning) return;
+        final snapshot = EngineBridge.instance.getMetrics();
+        setState(() => _nativeMetrics = snapshot);
       });
     } catch (e) {
       if (mounted) _showError('$e');
@@ -139,6 +157,7 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
   }
 
   void _stopEmulation() {
+    _diagnosticTimer?.cancel();
     if (_isRunning) {
       EngineBridge.instance.stopJit();
       EngineBridge.instance.unloadGame();
@@ -166,6 +185,33 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
           ),
         ],
       ),
+    );
+  }
+
+  void _copyNativeReport() {
+    final m = _nativeMetrics;
+    final report = [
+      'Xbox360RecompAndroid ARM64 diagnostics',
+      'Title: ${widget.titleId}',
+      'Native JIT state: ${m.jitState}',
+      'JIT blocks compiled: ${m.jitBlocksCompiled}',
+      'GPU/Vulkan status: ${m.gpuState} (0=idle,1=initializing,2=ready,3=failed)',
+      'Selected GPU: ${m.gpuName}',
+      'Vulkan frames presented: ${m.framesPresented}',
+      'PM4 packets: ${m.pm4Packets}',
+      'PM4 draw requests (STUB): ${m.pm4DrawAttempts}',
+      'Shader requests: ${m.shaderAttempts}',
+      'Vulkan shader modules created (placeholder): ${m.shaderCompiled}',
+      'Shader failures: ${m.shaderFailed}',
+      'Shader busy: ${m.shaderBusy}',
+      'FPS (presented frames): ${m.fps}',
+      'RAM: ${m.ramUsageBytes} bytes',
+      'Renderer limitation: Xenos draw/PM4 dispatch still incomplete.',
+      'Turnip override: not installed or supported in this build.',
+    ].join('\n');
+    Clipboard.setData(ClipboardData(text: report));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Native diagnostic counters copied')),
     );
   }
 
@@ -230,6 +276,49 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
                           onPressed: _resumeEmulation,
                           icon: const Icon(Icons.play_arrow_rounded),
                           label: const Text('Resume'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+            // Explain the black screen, rather than claiming JIT startup
+            // means the game is rendering. Copy exports counters, not ROM data.
+            if (_isRunning && _showDiagnostics && _sessionSeconds >= 4 &&
+                (_nativeMetrics.framesPresented == 0 ||
+                 _nativeMetrics.pm4DrawAttempts == 0))
+              Positioned(
+                top: 14,
+                right: 15,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withAlpha(225),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.amber.withAlpha(130)),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('GPU / JIT diagnostics',
+                            style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 6),
+                        Text(_nativeMetrics.blackScreenReason,
+                            style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                        const SizedBox(height: 5),
+                        Text(_nativeMetrics.shaderStatus,
+                            style: const TextStyle(color: Colors.white54, fontSize: 10)),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton.icon(
+                            onPressed: _copyNativeReport,
+                            icon: const Icon(Icons.copy, size: 15),
+                            label: const Text('Copy diagnostic'),
+                          ),
                         ),
                       ],
                     ),
