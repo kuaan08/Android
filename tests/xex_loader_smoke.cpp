@@ -68,7 +68,7 @@ int main() {
 
     write(file, xex(1,0));
     assert(!loader.load(file.string(), image));
-    assert(loader.lastError().find("decryption") != std::string::npos);
+    assert(loader.lastError().find("AES block size") != std::string::npos);
 
     write(file, xex(0,2));
     assert(!loader.load(file.string(), image));
