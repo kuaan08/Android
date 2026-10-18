@@ -93,6 +93,10 @@ class TermuxBuilderTests(unittest.TestCase):
         BUILDER.prepare_project(project, manifest_path, parsed, name, entry, game_root, xex, rel)
         self.assertEqual((project / "src/game_fixture_app.h").read_text().count("void OnLoadXexImage"), 1)
 
+    def test_toolchain_allows_real_linker_try_compiles(self):
+        toolchain = (ROOT / "termux/android-termux-toolchain.cmake").read_text(encoding="utf-8")
+        self.assertNotIn("set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)", toolchain)
+
     def test_cpp_string_escapes_utf8_and_quotes(self):
         result = BUILDER.cpp_string('game:\\a"é.xex')
         self.assertTrue(result.startswith('"') and result.endswith('"'))

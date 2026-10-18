@@ -4,7 +4,9 @@
 
 O launcher consegue gerar C++ para um XEX único e exportar um ZIP pelo seletor Android. O ZIP agora contém `generated-project/` e `xbo-game.json`; o manifest exportado usa referências portáteis (`../game` e `../game/<xex_path>`). **Os arquivos originais do jogo não são incluídos.** O preparador `build_generated.py` valida o hash e o cabeçalho XEX2, rejeita DLLs guest, configura um target Android, tenta compilar `libxbo_game.so` e, por padrão, invoca o empacotador APK do projeto.
 
-Foi provado nesta sandbox Linux ARM64 que o toolchain CMake customizado consegue usar Clang ARM64 + sysroot NDK, linkar `libc++_shared.so` e produzir uma shared library Android com ELF alinhado a 16 KiB. O teste não usou Termux nem o Clang Bionic do telefone e é somente um probe mínimo: **a build completa do ReXGlue/game e o empacotamento em APK ainda não foram validados em um telefone Termux.** O modo `--native-only` permite testar a biblioteca sem empacotar.
+Na sandbox Linux ARM64, o fixture sintético original do CI (`li r3,1; blr`) passou pelo codegen: o CLI encontrou uma função e emitiu C++ (`ctx.r3.s64 = 1`). A cross-build compilou `libxbo_game.so` e `librexruntime.so` para AArch64/Android API 33; ambos têm segmentos ELF `PT_LOAD` alinhados a 16 KiB. Esse teste usou Clang 20 da sandbox, o sysroot NDK r27c e um runtime compiler-rt temporário para AArch64 — não o Clang nativo do Termux.
+
+A compilação Java e a etapa D8 também passaram. O empacotamento parou em AAPT2: o Build Tools oficial Linux baixado é x86-64 e não executa nesta sandbox ARM64; `zipalign` e `apksigner` não chegaram a ser testados. **APK assinado e execução em aparelho/Termux continuam sem validação.** O modo `--native-only` permite testar a biblioteca sem empacotar.
 
 ## Root
 
