@@ -157,8 +157,8 @@ bool XexLoader::parseHeader(const std::vector<uint8_t>& raw, XexImage& img) {
             img.header.encryptionType = static_cast<XexEncryptionType>(encryption);
             img.header.compressionType = static_cast<XexCompressionType>(compression);
             // Keep offsets for BASIC compression block descriptors.
-            img.header.resourceTableOffset = value;
-            img.header.executableTableOffset = infoSize;
+            img.header.fileFormatInfoOffset = value;
+            img.header.fileFormatInfoSize = infoSize;
             foundFormat = true;
         } else if (key == kImports) {
             img.header.importTableOffset = value;
@@ -199,8 +199,8 @@ bool XexLoader::decompressSections(std::vector<uint8_t>& data, XexImage& image) 
     }
 
     if (compression == XexCompressionType::Basic) {
-        const size_t descriptor = image.header.resourceTableOffset;
-        const size_t infoSize = image.header.executableTableOffset;
+        const size_t descriptor = image.header.fileFormatInfoOffset;
+        const size_t infoSize = image.header.fileFormatInfoSize;
         if (infoSize <= 8 || (infoSize - 8) % 8 != 0) {
             m_lastError = "Invalid XEX2 BASIC compression block table";
             return false;
