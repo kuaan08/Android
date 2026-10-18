@@ -205,8 +205,9 @@ def package(work, metadata, libs, sdl_java, android_sdk, license_files=()):
             shutil.rmtree(directory)
     classes.mkdir(exist_ok=True); dex.mkdir(exist_ok=True)
     sources = [HERE / "android/LauncherActivity.java", HERE / "android/IsoReader.java",
-               HERE / "android/CodegenBridge.java"]
+               HERE / "android/CodegenBridge.java", HERE / "android/CodegenService.java"]
     game_runtime = any(lib.name == "libxbo_game.so" for lib in libs)
+    codegen_runtime = any(lib.name == "libxbo360_codegen_jni.so" for lib in libs)
     if game_runtime:
         sources += [HERE / "android/GameActivity.java"] + list(sdl_java.glob("*.java"))
     cmd([t["javac"], "-encoding", "UTF-8", "-source", "8", "-target", "8", "-classpath", t["android"], "-d", classes, *sources])
@@ -219,6 +220,7 @@ def package(work, metadata, libs, sdl_java, android_sdk, license_files=()):
             jar.write(p, p.relative_to(classes).as_posix())
     cmd([t["java"], "-cp", t["d8"], "com.android.tools.r8.D8", "--min-api", "33", "--lib", t["android"], "--output", dex, class_jar])
     game_activity = ('<activity android:name="org.xbo360.app.GameActivity" android:exported="false" android:process=":game" android:hardwareAccelerated="true" android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|navigation|density"/>' if game_runtime else '')
+    codegen_service = ('<service android:name="org.xbo360.app.CodegenService" android:exported="false" android:process=":codegen"/>' if codegen_runtime else '')
     manifest = work / "AndroidManifest.xml"
     manifest.write_text(f'''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package={quoteattr(metadata['package'])} android:versionCode="301" android:versionName="0.3.1">
 <uses-sdk android:minSdkVersion="33" android:targetSdkVersion="35"/>
@@ -226,7 +228,7 @@ def package(work, metadata, libs, sdl_java, android_sdk, license_files=()):
 <uses-feature android:name="android.hardware.gamepad" android:required="false"/>
 <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="false"/>
 <application android:label={quoteattr(metadata['title'])} android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:extractNativeLibs="true" android:usesCleartextTraffic="false">
-<activity android:name="org.xbo360.app.LauncherActivity" android:exported="true" android:configChanges="orientation|screenSize"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>{game_activity}</application></manifest>''')
+<activity android:name="org.xbo360.app.LauncherActivity" android:exported="true" android:configChanges="orientation|screenSize"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>{game_activity}{codegen_service}</application></manifest>''')
     unsigned, aligned, output = work / "unsigned.apk", work / "aligned.apk", work / ("Xbox360Recomp-Android.apk" if not metadata["native"] else metadata["name"] + ".apk")
     cmd([t["aapt2"], "link", "-I", t["android"], "--manifest", manifest, "-o", unsigned])
     with zipfile.ZipFile(unsigned, "a") as z:

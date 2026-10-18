@@ -22,7 +22,7 @@ import java.util.zip.*;
 public final class LauncherActivity extends Activity {
     final ExecutorService worker = Executors.newSingleThreadExecutor();
     LinearLayout content; TextView status; JSONObject metadata;
-    File library; volatile boolean closed; boolean busy; boolean codegenReady; String codegenError; long lastProgress;
+    File library; volatile boolean closed; boolean busy; boolean codegenInstalled; String codegenError; long lastProgress;
     File pendingExportProject; File pendingExportGameRoot;
     static final int EXPORT_PROJECT_REQUEST = 103;
     static final int GREEN = 0xff7cd336, BG = 0xff111318;
@@ -33,12 +33,10 @@ public final class LauncherActivity extends Activity {
             metadata = new JSONObject(read(getAssets().open("project.json"), 1024 * 1024));
             File base = getExternalFilesDir(null); if (base == null) base = getFilesDir();
             library = new File(base, "games"); if (!library.mkdirs() && !library.isDirectory()) throw new IOException("Cannot open game library");
-            File codegenLibrary = new File(getApplicationInfo().nativeLibraryDir, "libxbo360_codegen_jni.so");
-            if (codegenLibrary.isFile()) {
-                try { codegenReady = CodegenBridge.initialize(this); }
-                catch (LinkageError | RuntimeException e) { codegenError = e.toString(); }
-                if (!codegenReady && codegenError == null) codegenError = "ReXGlue Android runtime initialization failed.";
-            }
+            // Never load a JNI library from LauncherActivity: native crashes are
+            // process-fatal and must not terminate the menu on app startup.
+            codegenInstalled = new File(getApplicationInfo().nativeLibraryDir,
+                    "libxbo360_codegen_jni.so").isFile();
             draw();
         } catch (Exception e) { new AlertDialog.Builder(this).setMessage(e.toString()).setPositiveButton("Close", (d,w)->finish()).show(); }
     }
@@ -48,7 +46,7 @@ public final class LauncherActivity extends Activity {
         content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(28,28,28,28); scroll.addView(content); setContentView(scroll);
         text("XBOX 360 RECOMP", 27, GREEN); text(metadata.optString("title"), 18, Color.WHITE);
         text("Library · Xbox 360 → native Android", 14, 0xff9ca5b2);
-        if (codegenReady) text("Experimental: this device can generate C++ for single-XEX titles; it cannot yet compile a playable APK.", 13, 0xffefba63);
+        if (codegenInstalled) text("Experimental C++ generator packaged. ReXGlue starts only when you request codegen, in a separate crash-isolated process. It cannot compile a playable APK.", 13, 0xffefba63);
         else if (codegenError != null) text("On-device codegen unavailable: " + codegenError, 13, 0xffefba63);
         button("Select ISO / XISO", () -> pick(false)); button("Select extracted game folder", () -> pick(true));
         status = text(busy ? "Import in progress..." : "Choose a game below or import your files.", 14, GREEN);
@@ -62,7 +60,7 @@ public final class LauncherActivity extends Activity {
                 boolean nativeReady = metadata.optBoolean("native") && metadata.optString("sha256").equals(game.optString("sha256"));
                 text(title,21,Color.WHITE);
                 text(nativeReady ? "Native build available" : "Needs a native APK for this executable",13,nativeReady?GREEN:0xff9ca5b2);
-                if (codegenReady) button("Generate C++ on this device (experimental)", () -> generateCode(root, game));
+                if (codegenInstalled) button("Generate C++ on this device (experimental)", () -> generateCode(root, game));
                 if (hasGeneratedProject(root)) button("Export generated sources (ZIP)", () -> saveGeneratedProject(root, title));
                 button(nativeReady ? "Play " + title : "Details", () -> {
                     if (nativeReady) verifyAndLaunch(root,game);
@@ -95,7 +93,8 @@ public final class LauncherActivity extends Activity {
             .append(new File(libDir, "libxbo_game.so").isFile()).append('\n');
         info.append("ReXGlue runtime packaged: ")
             .append(new File(libDir, "librexruntime.so").isFile()).append('\n');
-        info.append("On-device codegen loaded: ").append(codegenReady).append('\n');
+        info.append("On-device codegen library packaged: ").append(codegenInstalled).append('\n');
+        info.append("Codegen service bound: ").append(codegenBound).append('\n');
         if (codegenError != null) info.append("Codegen error: ").append(codegenError).append('\n');
         if (library != null) {
             info.append("Free game storage MiB: ").append(library.getUsableSpace() / (1024 * 1024)).append('\n');
@@ -213,21 +212,99 @@ public final class LauncherActivity extends Activity {
             }catch(Exception e){runOnUiThread(()->{busy=false;message(e.getMessage());});}
         });
     }
+    private boolean codegenBound;
+    private Messenger codegenRemote;
+    private String activeCodegenProject;
+    private final Messenger codegenReply = new Messenger(new Handler(Looper.getMainLooper()) {
+        @Override public void handleMessage(Message msg) {
+            String detail = msg.getData().getString("detail");
+            if (closed || !codegenBound) return;
+            if (msg.what == CodegenService.PROGRESS) {
+                if (status != null) status.setText(detail == null ? "Generating C++..." : detail);
+            } else if (msg.what == CodegenService.COMPLETE) {
+                String path = activeCodegenProject;
+                endCodegen();
+                if (detail == null) message("C++ sources generated in:\n" + path
+                    + "\n\nNot compiled into a playable APK yet.");
+                else message("Code generation failed:\n" + detail);
+            }
+        }
+    });
+    private final ServiceConnection codegenConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            if (closed || !codegenBound) return;
+            codegenRemote = new Messenger(binder);
+            try {
+                Message request = Message.obtain(null, CodegenService.RUN);
+                request.replyTo = codegenReply;
+                Bundle data = new Bundle();
+                data.putString("name", codegenName);
+                data.putString("xex", codegenXex);
+                data.putString("game", codegenGame);
+                data.putString("project", activeCodegenProject);
+                request.setData(data);
+                codegenRemote.send(request);
+            } catch (RemoteException | RuntimeException e) {
+                codegenError = e.toString();
+                endCodegen();
+                message("Cannot contact the codegen process:\n" + e);
+            }
+        }
+        @Override public void onServiceDisconnected(ComponentName name) {
+            if (!closed && codegenBound) {
+                codegenError = "Codegen service exited unexpectedly (possible native crash).";
+                endCodegen();
+                message(codegenError + "\nCapture the Android crash buffer using adb logcat.");
+            }
+        }
+        @Override public void onNullBinding(ComponentName name) {
+            if (!closed && codegenBound) {
+                endCodegen();
+                message("Android did not bind the codegen service.");
+            }
+        }
+        @Override public void onBindingDied(ComponentName name) { onServiceDisconnected(name); }
+    };
+    private String codegenName, codegenXex, codegenGame;
+
+    private void endCodegen() {
+        if (codegenBound) {
+            codegenBound = false;
+            try { unbindService(codegenConnection); } catch (IllegalArgumentException ignored) {}
+        }
+        codegenRemote = null;
+        busy = false;
+        if (!closed) draw();
+    }
+
     void generateCode(File root,JSONObject info) {
-        if(!codegenReady){message("On-device codegen library is not available in this APK.");return;}
+        if (!codegenInstalled) {
+            message("The optional codegen JNI library is not installed in this APK.");
+            return;
+        }
         try {
-            String rootPath=root.getCanonicalPath();
-            File xex=new File(root,info.getString("xex_path"));
-            String xexPath=xex.getCanonicalPath();
-            if(!xexPath.startsWith(rootPath+File.separator)||!xex.isFile())throw new IOException("Executable path is outside the imported game folder");
-            File project=new File(new File(getFilesDir(),"recomp"),root.getName());
-            String projectPath=project.getCanonicalPath();
-            busy=true;status.setText("Preparing on-device code generation...");
-            Handler handler=new Handler(Looper.getMainLooper());
-            CodegenBridge.initAndRunCodegenAsync("Game_"+root.getName(),xexPath,rootPath,projectPath,handler,
-                progress->{if(!closed&&status!=null)status.setText(progress);},
-                error->{if(closed)return;busy=false;draw();if(error==null)message("C++ sources generated in:\n"+projectPath+"\n\nThey are not compiled into a playable APK yet.");else message("Code generation failed:\n"+error);});
-        } catch(Exception e) {busy=false;message("Code generation could not start: "+e.getMessage());}
+            String rootPath = root.getCanonicalPath();
+            File xex = new File(root, info.getString("xex_path"));
+            String xexPath = xex.getCanonicalPath();
+            if (!xexPath.startsWith(rootPath + File.separator) || !xex.isFile())
+                throw new IOException("Executable path is outside the imported game folder");
+            codegenName = "Game_" + root.getName();
+            codegenXex = xexPath;
+            codegenGame = rootPath;
+            activeCodegenProject = new File(new File(getFilesDir(), "recomp"),
+                root.getName()).getCanonicalPath();
+            busy = true;
+            status.setText("Starting separate codegen process...");
+            Intent service = new Intent(this, CodegenService.class);
+            codegenBound = bindService(service, codegenConnection, Context.BIND_AUTO_CREATE);
+            if (!codegenBound) {
+                busy = false;
+                message("Failed to start the isolated codegen process.");
+            }
+        } catch (Exception e) {
+            busy = false;
+            message("Code generation could not start: " + e.getMessage());
+        }
     }
     File generatedProject(File gameRoot){return new File(new File(getFilesDir(),"recomp"),gameRoot.getName());}
     boolean hasManifest(File project){File[] manifests=project.listFiles((dir,name)->name.endsWith("_manifest.toml"));return manifests!=null&&manifests.length==1;}
@@ -306,5 +383,5 @@ public final class LauncherActivity extends Activity {
     String hash(File file)throws Exception{MessageDigest d=MessageDigest.getInstance("SHA-256");try(InputStream in=new FileInputStream(file)){byte[] b=new byte[1024*1024];int n;while((n=in.read(b))!=-1){progress("Checking executable...");d.update(b,0,n);}}StringBuilder s=new StringBuilder();for(byte b:d.digest())s.append(String.format(Locale.ROOT,"%02x",b&255));return s.toString();}
     static String read(InputStream in,int limit)throws IOException{try(InputStream src=in;ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[8192];int n;while((n=src.read(b))!=-1){if(out.size()+n>limit)throw new IOException("Metadata too large");out.write(b,0,n);}return out.toString("UTF-8");}}
     static void delete(File f){if(f.isDirectory()){File[] all=f.listFiles();if(all!=null)for(File p:all)delete(p);}f.delete();}
-    @Override protected void onDestroy(){closed=true;worker.shutdownNow();super.onDestroy();}
+    @Override protected void onDestroy(){closed=true;if(codegenBound)endCodegen();worker.shutdownNow();super.onDestroy();}
 }

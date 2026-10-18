@@ -121,6 +121,9 @@ jobs:
       - name: Build experimental on-device ReXGlue codegen launcher
         run: |
           python xbo360.py android --ondevice-codegen --jobs 3
+          grep -F 'android:process=":codegen"' dist/android-launcher/AndroidManifest.xml
+          grep -F 'org.xbo360.app.CodegenService' dist/android-launcher/AndroidManifest.xml
+          test -s dist/android-launcher/Xbox360Recomp-Android.apk
           cp dist/android-launcher/Xbox360Recomp-Android.apk dist/Xbox360Recomp-Android-Codegen.apk
       - uses: actions/upload-artifact@v4
         with:
