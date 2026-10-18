@@ -66,6 +66,8 @@ struct XexHeader {
     uint32_t executableTableOffset;
     uint32_t importTableOffset;
     uint32_t resourceTableOffset;
+    uint32_t fileFormatInfoOffset;
+    uint32_t fileFormatInfoSize;
     XexCompressionType compressionType;
     XexEncryptionType  encryptionType;
 };

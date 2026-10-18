@@ -98,7 +98,9 @@ class _EmulationScreenState extends ConsumerState<EmulationScreen>
       int result = bridge.loadGame(game.execPath, game.format);
 
       if (result != 0) {
-        if (mounted) _showError('Failed to load game (error $result)');
+        if (mounted) _showError('Could not prepare Xbox 360 executable (error $result).\n\n' +
+            EngineBridge.lastLoadError +
+            '\n\nThe ARM64 runtime is present; XEX2 compatibility and JIT are still experimental.');
         return;
       }
 

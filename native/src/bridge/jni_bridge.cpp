@@ -11,6 +11,7 @@
 #include <cstring>
 #include <string>
 #include <atomic>
+#include <algorithm>
 
 #include "../../include/loader/xex_loader.h"
 #include "../../include/loader/stfs_parser.h"
@@ -32,6 +33,7 @@ x360::gpu::GpuLayer  g_gpuLayer;
 std::atomic<bool> g_initialized{false};
 std::string g_gameDir;
 std::string g_saveDir;
+std::string g_lastLoadError;
 
 // Guest address space — 4 GB mmap region
 static constexpr size_t   GUEST_MEM_SIZE = 0x100000000ULL;
@@ -111,13 +113,15 @@ void x360_engine_shutdown() {
 }
 
 int32_t x360_xex_load(const char* path, char* outTitleId, int32_t outLen) {
+    g_lastLoadError.clear();
     g_titleReady.store(false);
     if (!g_initialized.load() || !path) return -1;
     LOGI("Loading XEX: %s", path);
 
     x360::XexImage img;
     if (!g_xexLoader.load(std::string(path), img)) {
-        LOGE("XEX load failed: %s", g_xexLoader.lastError().c_str());
+        g_lastLoadError = g_xexLoader.lastError();
+        LOGE("XEX load failed: %s", g_lastLoadError.c_str());
         return -2;
     }
 
@@ -140,13 +144,15 @@ int32_t x360_xex_load(const char* path, char* outTitleId, int32_t outLen) {
 }
 
 int32_t x360_stfs_load(const char* path, char* outTitleId, int32_t outLen) {
+    g_lastLoadError.clear();
     if (!g_initialized.load()) return -1;
     LOGI("Loading STFS: %s", path);
 
     x360::StfsParser parser;
     x360::StfsPackage pkg;
     if (!parser.open(std::string(path), pkg)) {
-        LOGE("STFS open failed: %s", parser.lastError().c_str());
+        g_lastLoadError = parser.lastError();
+        LOGE("STFS open failed: %s", g_lastLoadError.c_str());
         return -2;
     }
 
@@ -158,6 +164,7 @@ int32_t x360_stfs_load(const char* path, char* outTitleId, int32_t outLen) {
 }
 
 int32_t x360_iso_load(const char* path, char* outTitleId, int32_t outLen) {
+    g_lastLoadError.clear();
     g_titleReady.store(false);
     if (!g_initialized.load() || !path) return -1;
     // Old code only checked the disc header and returned success without
@@ -167,7 +174,16 @@ int32_t x360_iso_load(const char* path, char* outTitleId, int32_t outLen) {
     return result;
 }
 
+int32_t x360_last_load_error(char* dst, int32_t len) {
+    if (!dst || len <= 0) return -1;
+    const auto copied = std::min<size_t>(g_lastLoadError.size(), size_t(len - 1));
+    std::memcpy(dst, g_lastLoadError.data(), copied);
+    dst[copied] = '\0';
+    return static_cast<int32_t>(copied);
+}
+
 void x360_game_unload() {
+    g_lastLoadError.clear();
     g_titleReady.store(false);
     g_jitEngine.stop();
     LOGI("Game unloaded");
