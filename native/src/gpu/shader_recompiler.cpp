@@ -189,6 +189,8 @@ ShaderEntry* GpuLayer::getOrCompileShader(const uint8_t* microcode, uint32_t siz
 
     if (!decompileMicrocode(microcode, size, isVertex, entry.spirv)) {
         LOGE("SHADER: decompile failed");
+        m_shadersFailed.fetch_add(1, std::memory_order_relaxed);
+        m_shaderBusy.store(false);
         return nullptr;
     }
 
