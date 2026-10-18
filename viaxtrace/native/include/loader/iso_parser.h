@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <cstdio>
+#include <unordered_set>
 #include <string>
 #include <vector>
 #include <functional>
@@ -8,7 +10,7 @@ namespace x360 {
 
 struct IsoFileEntry {
     std::string name;
-    uint32_t    offset;   // byte offset in ISO
+    uint64_t    offset;   // byte offset in ISO; XGD3 images exceed 4 GiB
     uint32_t    size;
     bool        isDirectory;
 };
@@ -39,12 +41,15 @@ public:
 private:
     bool parseIso9660();
     bool parseXdvdfs();
-    void walkIso9660Directory(uint32_t lba, uint32_t size, const std::string& prefix);
-    void walkXdvdfsDirectory(uint32_t offset, uint32_t size, const std::string& prefix);
+    void walkIso9660Directory(uint32_t lba, uint32_t size, const std::string& prefix, int depth = 0);
+    void walkXdvdfsDirectory(uint64_t offset, uint32_t size, const std::string& prefix, int depth = 0);
 
     std::string m_path;
     FILE*       m_file = nullptr;
     bool        m_isXdvdfs = false;
+    uint64_t    m_partitionOffset = 0;
+    uint64_t    m_fileSize = 0;
+    std::unordered_set<uint64_t> m_seenDirectories;
     std::vector<IsoFileEntry> m_files;
     std::string m_lastError;
 };
