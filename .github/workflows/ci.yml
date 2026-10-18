@@ -88,6 +88,11 @@ jobs:
           path: ~/.cache/Xbox360Recomp/android
           key: android-rp6-8dd8b369-clang20-ndk27c-${{ github.run_id }}
           restore-keys: android-rp6-8dd8b369-clang20-ndk27c-
+      - name: Test Android XDVDFS ISO reader on host JVM
+        run: |
+          mkdir -p dist/iso-java-tests
+          javac -d dist/iso-java-tests android/IsoReader.java ci/IsoReaderSmoke.java
+          java -cp dist/iso-java-tests IsoReaderSmoke
       - name: Build and verify library APK
         run: python xbo360.py android
       - uses: actions/upload-artifact@v4
@@ -113,6 +118,16 @@ jobs:
           restore-keys: android-cross-rp6-ndk27c-
       - name: Compile synthetic title for Android ARM64 and export signed APK
         run: python xbo360.py android --project dist/android-fixture --runtime --jobs 3
+      - name: Build experimental on-device ReXGlue codegen launcher
+        run: |
+          python xbo360.py android --ondevice-codegen --jobs 3
+          cp dist/android-launcher/Xbox360Recomp-Android.apk dist/Xbox360Recomp-Android-Codegen.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xbox360Recomp-Android-Codegen
+          path: dist/Xbox360Recomp-Android-Codegen.apk
+          retention-days: 14
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
