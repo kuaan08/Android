@@ -1,35 +1,73 @@
-# Build Android pelo Termux — estado experimental
+# Build Android no Termux — builder experimental
 
-## O que já funciona no protótipo
+## Estado real
 
-O launcher consegue gerar fontes C++ ReXGlue para um XEX único. Após a geração, o novo botão **Export generated sources (ZIP)** salva o projeto pelo seletor de documentos do Android. O arquivo contém fontes e manifest, mas não inclui os arquivos originais do jogo. Alguns caminhos do manifest apontam para o armazenamento privado do launcher. Por isso, o ZIP ainda não é um projeto pronto para compilar no Termux.
+O launcher consegue gerar C++ para um XEX único e exportar um ZIP pelo seletor Android. O ZIP agora contém `generated-project/` e `xbo-game.json`; o manifest exportado usa referências portáteis (`../game` e `../game/<xex_path>`). **Os arquivos originais do jogo não são incluídos.** O preparador `build_generated.py` valida o hash e o cabeçalho XEX2, rejeita DLLs guest, configura um target Android, tenta compilar `libxbo_game.so` e, por padrão, invoca o empacotador APK do projeto.
 
-Este diretório é documentação do caminho de porte; **não há ainda um `build.sh` Termux funcional nem um APK de jogo gerado no telefone**.
+Foi provado nesta sandbox Linux ARM64 que o toolchain CMake customizado consegue usar Clang ARM64 + sysroot NDK, linkar `libc++_shared.so` e produzir uma shared library Android com ELF alinhado a 16 KiB. O teste não usou Termux nem o Clang Bionic do telefone e é somente um probe mínimo: **a build completa do ReXGlue/game e o empacotamento em APK ainda não foram validados em um telefone Termux.** O modo `--native-only` permite testar a biblioteca sem empacotar.
 
-## O root ajuda?
+## Root
 
-O root pode facilitar operações administrativas, mas não fornece Clang, CMake, Ninja, sysroot nem ferramentas de empacotamento. Também não transforma os executáveis Linux x86-64 do NDK em programas executáveis no Android ARM64. A documentação do NDK lista toolchains de host para Linux x86-64, macOS x86-64 e Windows x86-64.
+Root não é requisito e o builder não chama `su`. Root não instala o Clang/NDK/sysroot, não fornece AAPT2/D8/zipalign/apksigner e não transforma ferramentas Linux x86-64 em executáveis Android ARM64. Compile como usuário normal e deixe o instalador Android solicitar confirmação para instalar o APK. Não execute o XEX nem código gerado com privilégios de root.
 
-Não execute o compilador, o XEX ou código C++ gerado com `su`. O jogo e os artefatos são entradas não confiáveis; compilar como root exporia o aparelho a riscos desnecessários. O Termux pode compilar como o próprio usuário, e a instalação normal do APK assinado deve ser confirmada pelo instalador Android. O Android 10/API 29+ removeu a permissão de execução do diretório privado gravável do app, então não se deve extrair o compilador em `filesDir` e tentar iniciá-lo por `ProcessBuilder`.
+## Preparar os arquivos
 
-## O que falta para um build Termux completo
+1. No launcher, gere o C++ e use **Export generated sources (ZIP)**. Extraia o ZIP em uma pasta privada do Termux, por exemplo `~/xbo360-build/`.
+2. Extraia, em separado, os dados do jogo de sua propriedade para `~/xbo360-build/game/`, mantendo o caminho indicado em `xbo-game.json`. O arquivo XEX precisa ter o mesmo SHA-256 registrado no ZIP. O jogo não deve ser colocado dentro do APK pelo builder.
+3. Instale no Termux Python 3, Git, CMake 3.25+, Ninja, Clang/LLD e JDK 17 ou 21 (por exemplo, usando os pacotes nativos do Termux). Para empacotar também são necessários `aapt2`, `zipalign`, D8 (`d8.jar`), `apksigner` (`apksigner.jar`) e Android Platform 35 (`android.jar`). Confira `command -v aapt2` e `command -v zipalign`; os executáveis nativos precisam ser builds compatíveis com Android/Termux. Os binários Linux x86-64 do SDK não servem. D8 e apksigner devem ser JARs executáveis pelo JDK instalado.
+4. Obtenha o sysroot do NDK r27c e a plataforma Android API 35. `fetch_ndk_sysroot.py` consulta os metadados oficiais do Google, valida o SHA-1 publicado e extrai somente o sysroot do arquivo NDK; ele nunca executa as ferramentas host Linux x86-64. O arquivo compactado é grande e é removido após a extração por padrão. O `android.jar` da plataforma 35 e as ferramentas APK continuam sendo instalações separadas.
 
-1. Exportar o ZIP para uma pasta que o usuário também consiga abrir no Termux, por exemplo Downloads, e extrair uma cópia no `$HOME` do Termux. A permissão de armazenamento compartilhado do Termux é configurada pelo próprio Termux.
-2. Tornar o manifest portátil: substituir caminhos absolutos do app, permitir apontar para os dados do jogo selecionados pelo usuário e manter os arquivos do jogo fora do ZIP por padrão.
-3. Gerar um `CMakeLists.txt` de título compatível com o runtime Android deste fork. O caminho desktop que faz essa preparação está em `android_build.py`, mas também invoca um gerador host Linux/Windows que não é executável diretamente no Termux.
-4. Usar o Clang/LLD/CMake/Ninja instalados no Termux com o sysroot do NDK r27c em um toolchain CMake próprio para `arm64-v8a`, API 33 e alinhamento ELF de 16 KiB. Essa combinação ainda precisa ser portada e validada em um telefone real.
-5. Empacotar a biblioteca gerada e a classe Java em um APK. Isso exige ferramentas Android compatíveis com Termux para gerar DEX, processar/empacotar recursos, alinhar e assinar. O exemplo comunitário ligado abaixo demonstra APK Java simples em Termux, não o build nativo C++ deste projeto.
+```sh
+python3 /caminho/para/Android/termux/fetch_ndk_sysroot.py \
+  --dest "$HOME/android-ndk-r27c-termux"
+```
 
-## Fluxo proposto quando o builder existir
+## Comando
 
-No launcher: gerar o código e exportar o ZIP pelo seletor Android. No Termux: extrair o ZIP no espaço privado do Termux, configurar os caminhos para os dados do jogo, compilar como usuário normal e gerar um APK assinado. Por fim, abrir o APK no instalador do Android para que o usuário confirme a instalação.
+Defina os caminhos das ferramentas. Os nomes reais de pacote podem variar; use `command -v` para os executáveis e aponte os JARs para arquivos que existam:
 
-**Root não é requisito desse fluxo e não será usado para executar binários ou código guest.** O primeiro marco entregue é somente a exportação segura das fontes. Não use os comandos do build desktop como se fossem comandos Termux: o host CLI e as ferramentas NDK atuais dependem de um ambiente de build ainda não portado.
+```sh
+export ANDROID_NDK_SYSROOT="$HOME/android-ndk-r27c-termux/sysroot"
+export ANDROID_HOME="$HOME/android-sdk"
+export XBO_ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+export XBO_AAPT2="$(command -v aapt2)"
+export XBO_ZIPALIGN="$(command -v zipalign)"
+export XBO_D8_JAR="$ANDROID_HOME/build-tools/35.0.0/lib/d8.jar"
+export XBO_APKSIGNER_JAR="$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar"
 
-## Referências
+python3 /caminho/para/Android/termux/build_generated.py \
+  --bundle "$HOME/xbo360-build" \
+  --game-root "$HOME/xbo360-build/game" \
+  --android-sdk "$ANDROID_HOME" \
+  --ndk-sysroot "$ANDROID_NDK_SYSROOT" \
+  --jobs 2
+```
+
+O primeiro build clona a revisão ReXGlue fixada pelo projeto e inicializa seus submódulos; isso exige rede e espaço livre considerável. A saída é `<project-name>.apk` em `termux-build/package/`, assinado com uma chave de debug local. Para abrir o instalador do Android sem root:
+
+```sh
+termux-setup-storage
+APK=$(find "$HOME/xbo360-build/termux-build/package" -maxdepth 1 -name '*.apk' -print -quit)
+cp "$APK" "$HOME/storage/shared/Download/"
+termux-open "$HOME/storage/shared/Download/$(basename "$APK")"
+```
+
+Confirme a instalação no Package Installer e permita instalações solicitadas pelo Termux, se o Android pedir. Para testar apenas a compilação nativa, acrescente `--native-only`; isso não produz APK.
+
+## Limitações e segurança
+
+- A implementação suporta um XEX e recusa qualquer `.dll`; integração de módulos guest ainda falta.
+- A compilação completa C++ e o empacotamento/instalação precisam ser exercitados em Termux/Android real; o probe de `.so` não valida o ReXGlue completo nem compatibilidade de jogo.
+- O ZIP não contém os dados do jogo. O APK verifica o SHA-256 do executável e o launcher precisa importar os dados correspondentes depois da instalação.
+- A análise e o codegen não garantem que um jogo comercial seja compatível ou jogável. O código gerado e o XEX são entradas não confiáveis; mantenha o build sem root.
+- A geração de um APK local não remove as limitações do runtime, Vulkan/GPU, memória, DLLs ou análise de funções do Xbox 360.
+
+## Referências principais
 
 - [Android NDK: CMake](https://developer.android.com/ndk/guides/cmake)
 - [Android NDK: outros sistemas de build e host tags](https://developer.android.com/ndk/guides/other_build_systems)
 - [Android 10: execução no diretório privado do app](https://developer.android.com/about/versions/10/behavior-changes-10)
 - [Android: riscos de carregamento dinâmico de código](https://developer.android.com/privacy-and-security/risks/dynamic-code-loading)
-- [Exemplo comunitário de build APK Java em Termux](https://github.com/azmaveth/termux-android-hello)
+- [Termux package repository](https://github.com/termux/termux-packages)
+- [Example de build APK Java em Termux](https://github.com/azmaveth/termux-android-hello) (não demonstra esta pipeline nativa)
+- [Pesquisa de tentativas públicas e recomendações para este builder](RESEARCH.md)

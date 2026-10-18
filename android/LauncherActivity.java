@@ -23,7 +23,7 @@ public final class LauncherActivity extends Activity {
     final ExecutorService worker = Executors.newSingleThreadExecutor();
     LinearLayout content; TextView status; JSONObject metadata;
     File library; volatile boolean closed; boolean busy; boolean codegenReady; String codegenError; long lastProgress;
-    File pendingExportProject;
+    File pendingExportProject; File pendingExportGameRoot;
     static final int EXPORT_PROJECT_REQUEST = 103;
     static final int GREEN = 0xff7cd336, BG = 0xff111318;
 
@@ -89,12 +89,12 @@ public final class LauncherActivity extends Activity {
     @Override protected void onActivityResult(int request,int result,Intent data) {
         super.onActivityResult(request,result,data);
         if(request==EXPORT_PROJECT_REQUEST) {
-            File project=pendingExportProject;pendingExportProject=null;
+            File project=pendingExportProject,gameRoot=pendingExportGameRoot;pendingExportProject=null;pendingExportGameRoot=null;
             if(result!=RESULT_OK||data==null||data.getData()==null)return;
-            if(project==null){message("There is no generated project to export.");return;}
+            if(project==null||gameRoot==null){message("There is no generated project to export.");return;}
             Uri destination=data.getData();busy=true;
             if(status!=null)status.setText("Exporting generated sources...");
-            worker.execute(()->exportProjectZip(project,destination));
+            worker.execute(()->exportProjectZip(project,gameRoot,destination));
             return;
         }
         if(result!=RESULT_OK||data==null||data.getData()==null)return;
@@ -192,36 +192,69 @@ public final class LauncherActivity extends Activity {
     void saveGeneratedProject(File gameRoot,String title){
         if(!hasGeneratedProject(gameRoot)){message("No generated ReXGlue project was found for this game.");return;}
         String safe=title.replaceAll("[^A-Za-z0-9._-]+","_");if(safe.isEmpty())safe="xbox360-project";if(safe.length()>80)safe=safe.substring(0,80);
-        pendingExportProject=generatedProject(gameRoot);
+        pendingExportProject=generatedProject(gameRoot);pendingExportGameRoot=gameRoot;
         Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.addCategory(Intent.CATEGORY_OPENABLE);intent.setType("application/zip");intent.putExtra(Intent.EXTRA_TITLE,safe+"-generated-sources.zip");
-        try{startActivityForResult(intent,EXPORT_PROJECT_REQUEST);}catch(ActivityNotFoundException e){pendingExportProject=null;message("No file picker is available to save the source archive.");}
+        try{startActivityForResult(intent,EXPORT_PROJECT_REQUEST);}catch(ActivityNotFoundException e){pendingExportProject=null;pendingExportGameRoot=null;message("No file picker is available to save the source archive.");}
     }
-    void exportProjectZip(File project,Uri destination){
+    void exportProjectZip(File project,File gameRoot,Uri destination){
         try{
-            String canonical=project.getCanonicalPath();File base=new File(getFilesDir(),"recomp");
+            String canonical=project.getCanonicalPath(),canonicalGame=gameRoot.getCanonicalPath();File base=new File(getFilesDir(),"recomp");
             if(!canonical.startsWith(base.getCanonicalPath()+File.separator)||!hasManifest(project))throw new IOException("Generated project path or manifest is invalid.");
+            File gameInfoFile=new File(gameRoot,"xbo-game.json");if(!gameInfoFile.isFile())throw new IOException("Game metadata is missing.");
+            JSONObject game=new JSONObject(read(new FileInputStream(gameInfoFile),1024*1024));String originalXex=game.optString("xex_path");
+            File xex=new File(gameRoot,originalXex);String canonicalXex=xex.getCanonicalPath();
+            if(!canonicalXex.startsWith(canonicalGame+File.separator)||!xex.isFile())throw new IOException("XEX path is outside the imported game folder.");
+            String relativeXex=gameRoot.toPath().toRealPath().relativize(xex.toPath().toRealPath()).toString().replace(File.separatorChar,'/');
+            if(!hash(xex).equals(game.optString("sha256")))throw new IOException("Imported XEX checksum does not match its metadata.");
             OutputStream raw=getContentResolver().openOutputStream(destination,"w");if(raw==null)throw new IOException("Cannot open the selected destination.");
             try(ZipOutputStream zip=new ZipOutputStream(new BufferedOutputStream(raw))){
-                int[] files={0};long[] bytes={0};Set<String> seen=new HashSet<>();addProjectFilesToZip(project,project,zip,files,bytes,seen);
+                zip.putNextEntry(new ZipEntry("xbo-game.json"));zip.write(game.toString(2).getBytes("UTF-8"));zip.closeEntry();
+                int[] files={0};long[] bytes={0};Set<String> seen=new HashSet<>();addProjectFilesToZip(project,project,relativeXex,zip,files,bytes,seen);
                 zip.putNextEntry(new ZipEntry("TERMUX-README.txt"));
                 zip.write(("Generated ReXGlue sources only. This archive does not contain original game data and is not a playable APK.\n"+
-                    "The manifest may include paths from the source app's private storage; a Termux build must relocate/recreate those paths.\n"+
-                    "This prototype does not yet include a Termux C++ build-and-package script. Do not run build tools or generated code as root.\n").getBytes("UTF-8"));
+                    "The archive contains generated-project/ and xbo-game.json. Extract your own game data into a sibling game/ directory, preserving xex_path from xbo-game.json.\n"+
+                    "The generated manifest has portable references to ../game and ../game/<xex_path>; the game files are not copied or redistributed.\n"+
+                    "A native Termux compiler/package step is still required. Do not run build tools or generated code as root.\n").getBytes("UTF-8"));
                 zip.closeEntry();zip.finish();
             }
-            if(!closed)runOnUiThread(()->{busy=false;draw();message("Generated sources exported. The ZIP excludes game data and is not an installable APK; a Termux build step is still required.");});
+            if(!closed)runOnUiThread(()->{busy=false;draw();message("Generated sources and portable XEX metadata exported. The ZIP excludes game data and is not an installable APK; a Termux build step is still required.");});
         }catch(Exception e){if(!closed)runOnUiThread(()->{busy=false;draw();message("Source export failed: "+e.getMessage());});}
     }
-    void addProjectFilesToZip(File root,File entry,ZipOutputStream zip,int[] files,long[] bytes,Set<String> seen)throws IOException{
+    void addProjectFilesToZip(File root,File entry,String relativeXex,ZipOutputStream zip,int[] files,long[] bytes,Set<String> seen)throws IOException{
         if(closed||Thread.currentThread().isInterrupted())throw new IOException("Export cancelled.");
         String canonicalRoot=root.getCanonicalPath(),canonical=entry.getCanonicalPath();
         if(!canonical.equals(canonicalRoot)&&!canonical.startsWith(canonicalRoot+File.separator))throw new IOException("Project path escaped its root.");
         if(!seen.add(canonical))throw new IOException("Duplicate or cyclic project path.");
-        if(entry.isDirectory()){File[] children=entry.listFiles();if(children==null)throw new IOException("Cannot enumerate generated project.");for(File child:children)addProjectFilesToZip(root,child,zip,files,bytes,seen);return;}
+        if(entry.isDirectory()){File[] children=entry.listFiles();if(children==null)throw new IOException("Cannot enumerate generated project.");for(File child:children)addProjectFilesToZip(root,child,relativeXex,zip,files,bytes,seen);return;}
         if(!entry.isFile())throw new IOException("Unsupported project entry.");if(++files[0]>200000)throw new IOException("Project contains too many files.");
         String relative=root.toPath().relativize(entry.toPath()).toString().replace(File.separatorChar,'/');zip.putNextEntry(new ZipEntry("generated-project/"+relative));
+        if(entry.getName().endsWith("_manifest.toml")){
+            String manifest=read(new FileInputStream(entry),8*1024*1024);zip.write(rewriteManifestForArchive(manifest,relativeXex).getBytes("UTF-8"));zip.closeEntry();return;
+        }
         try(InputStream in=new BufferedInputStream(new FileInputStream(entry))){byte[] buffer=new byte[64*1024];int n;while((n=in.read(buffer))!=-1){if(closed||Thread.currentThread().isInterrupted())throw new IOException("Export cancelled.");zip.write(buffer,0,n);bytes[0]+=n;if((bytes[0]&0x3fffff)==0)progress("Exporting generated sources: "+files[0]+" files");}}
         zip.closeEntry();
+    }
+    static String rewriteManifestForArchive(String source,String relativeXex){
+        StringBuilder out=new StringBuilder();String section="";String[] lines=source.split("\\r?\\n",-1);
+        for(int i=0;i<lines.length;i++){
+            String line=lines[i],trim=line.trim();if(trim.startsWith("["))section=trim;
+            if(section.equals("[project]")&&trim.startsWith("game_root" )&&trim.substring("game_root".length()).trim().startsWith("="))line="game_root = \"../game\"";
+            if(section.equals("[entrypoint]")&&trim.startsWith("file_path")&&trim.substring("file_path".length()).trim().startsWith("="))line="file_path = "+tomlString("../game/"+relativeXex);
+            out.append(line);if(i+1<lines.length)out.append('\n');
+        }
+        return out.toString();
+    }
+    static String tomlString(String value){
+        StringBuilder out=new StringBuilder("\"");
+        for(int i=0;i<value.length();i++){
+            char c=value.charAt(i);
+            if(c=='\\'||c=='\"')out.append('\\').append(c);
+            else if(c=='\b')out.append("\\b");else if(c=='\t')out.append("\\t");
+            else if(c=='\n')out.append("\\n");else if(c=='\f')out.append("\\f");else if(c=='\r')out.append("\\r");
+            else if(c<0x20||c==0x7f)out.append(String.format(Locale.ROOT,"\\u%04x",(int)c));
+            else out.append(c);
+        }
+        return out.append('\"').toString();
     }
     void findDefault(File dir,List<File> found,int depth)throws IOException{if(depth>64)throw new IOException("Folder too deep");File[] files=dir.listFiles();if(files!=null)for(File f:files){if(f.isDirectory())findDefault(f,found,depth+1);else if(f.getName().equalsIgnoreCase("default.xex"))found.add(f);}}
     String hash(File file)throws Exception{MessageDigest d=MessageDigest.getInstance("SHA-256");try(InputStream in=new FileInputStream(file)){byte[] b=new byte[1024*1024];int n;while((n=in.read(b))!=-1){progress("Checking executable...");d.update(b,0,n);}}StringBuilder s=new StringBuilder();for(byte b:d.digest())s.append(String.format(Locale.ROOT,"%02x",b&255));return s.toString();}

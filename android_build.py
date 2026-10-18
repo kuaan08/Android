@@ -32,9 +32,11 @@ def tools(sdk=None):
     bt = sdk / "build-tools/35.0.0"
     if not bt.is_dir():
         bt = latest(sdk / "build-tools")
-    android = sdk / "platforms/android-35/android.jar"
-    if not bt or not android.is_file():
-        raise ValueError("Install Android SDK platform 35 and build-tools 35, or choose the SDK folder in Settings.")
+    if bt is None:
+        bt = sdk / "build-tools/35.0.0"
+    android = Path(os.environ.get("XBO_ANDROID_JAR", sdk / "platforms/android-35/android.jar")).resolve()
+    if not android.is_file():
+        raise ValueError("Android platform 35 android.jar is missing; set XBO_ANDROID_JAR or choose the SDK folder.")
     suffix = ".exe" if os.name == "nt" else ""
     java_home = Path(os.environ.get("JAVA_HOME", ""))
     fallback = android_tools.JDK
@@ -46,8 +48,12 @@ def tools(sdk=None):
         if not p.is_file():
             p = Path(shutil.which(name) or "__missing__")
         found[name] = p
-    found.update(aapt2=bt / ("aapt2" + suffix), zipalign=bt / ("zipalign" + suffix),
-                 d8=bt / "lib/d8.jar", apksigner=bt / "lib/apksigner.jar", android=android)
+    found.update(
+        aapt2=Path(os.environ.get("XBO_AAPT2", bt / ("aapt2" + suffix))).resolve(),
+        zipalign=Path(os.environ.get("XBO_ZIPALIGN", bt / ("zipalign" + suffix))).resolve(),
+        d8=Path(os.environ.get("XBO_D8_JAR", bt / "lib/d8.jar")).resolve(),
+        apksigner=Path(os.environ.get("XBO_APKSIGNER_JAR", bt / "lib/apksigner.jar")).resolve(),
+        android=android)
     if not all(p.is_file() for p in found.values()):
         raise ValueError("Android packaging requires a full JDK 17 and SDK aapt2, D8, zipalign and apksigner.")
     return sdk, found
