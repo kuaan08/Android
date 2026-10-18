@@ -173,7 +173,7 @@ private:
     std::unordered_map<uint64_t, TextureEntry> m_textureCache;
 
     uint64_t m_lastFrameNs = 0;
-    float    m_fps         = 0.0f;
+    std::atomic<float> m_fps{0.0f};
     uint32_t m_frameCount  = 0;
     bool     m_initialized = false;
     ANativeWindow* m_window = nullptr;
