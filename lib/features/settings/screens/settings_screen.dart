@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -18,15 +19,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _fpsOverlay = true;
   bool _darkStatusBar = true;
   int _logLevel = 1;
+  String _gamesFolder = 'App private library (managed automatically)';
+  String _savesFolder = 'App private saves (managed automatically)';
+  static const MethodChannel _storageChannel =
+      MethodChannel('com.viaxecomp.xbox360recomp/import');
 
   @override
   void initState() {
     super.initState();
     _loadInfo();
+    _loadDirectories();
   }
 
   Future<void> _loadInfo() async {
     final info = await PackageInfo.fromPlatform();
+    if (!mounted) return;
     setState(() => _version = '${info.version}+${info.buildNumber}');
     _computeCacheSize();
   }
@@ -136,15 +143,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       _SelectTile(
                         icon: Icons.folder_outlined,
                         title: 'Games Directory',
-                        subtitle: 'Internal storage / Xbox360Recomp / games',
-                        onTap: () {},
+                        subtitle: _gamesFolder,
+                        onTap: () => _chooseDirectory('games'),
                       ),
                       const _Divider(),
                       _SelectTile(
                         icon: Icons.save_outlined,
                         title: 'Saves Directory',
-                        subtitle: 'Internal storage / Xbox360Recomp / saves',
-                        onTap: () {},
+                        subtitle: _savesFolder,
+                        onTap: () => _chooseDirectory('saves'),
                       ),
                       const _Divider(),
                       _SelectTile(
@@ -194,7 +201,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: Icons.code_rounded,
                         title: 'Source Code',
                         subtitle: 'Open on GitHub',
-                        onTap: () => launchUrl(Uri.parse('https://github.com/ViaXTrace/Xbox360RecompAndroid')),
+                        onTap: () => launchUrl(Uri.parse('https://github.com/kuaan08/Android')),
                       ),
                       const _Divider(),
                       _SelectTile(
@@ -213,6 +220,75 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _loadDirectories() async {
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      for (final kind in ['games', 'saves']) {
+        final base = Directory(appDir.path + '/' + kind);
+        await base.create(recursive: true);
+        final setting = await _storageChannel.invokeMapMethod<String, dynamic>(
+          'getDirectory', {'kind': kind});
+        if (!mounted) return;
+        final name = setting?['name'] as String?;
+        final subtitle = (name == null || name.isEmpty)
+            ? 'App private: ' + base.path
+            : 'External bookmark: ' + name + ' (not used by JIT)';
+        setState(() {
+          if (kind == 'games') {
+            _gamesFolder = subtitle;
+          } else {
+            _savesFolder = subtitle;
+          }
+        });
+      }
+    } catch (error) {
+      if (mounted) _showStorageError(error);
+    }
+  }
+
+  void _showStorageError(Object error) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Storage access failed: ' + error.toString()),
+      duration: const Duration(seconds: 8),
+    ));
+  }
+
+  Future<void> _chooseDirectory(String kind) async {
+    final answer = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(kind == 'games' ? 'Games folder' : 'Saves folder'),
+        content: const Text(
+          'Android 14 uses Storage Access Framework for folders. '
+          'The game runtime currently needs private filesystem paths. '
+          'Choosing an external folder saves an access bookmark only; it does '
+          'not move existing games or saves. You do not need global storage permissions.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'reset'),
+            child: const Text('Use internal')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'select'),
+            child: const Text('Choose folder')),
+        ],
+      ),
+    );
+    if (answer == null) return;
+    try {
+      if (answer == 'select') {
+        await _storageChannel.invokeMapMethod<String, dynamic>(
+          'chooseDirectory', {'kind': kind});
+      } else {
+        await _storageChannel.invokeMethod<void>(
+          'resetDirectory', {'kind': kind});
+      }
+      if (mounted) await _loadDirectories();
+    } catch (error) {
+      if (mounted) _showStorageError(error);
+    }
   }
 
   String _logLevelName(int l) => ['Quiet', 'Error', 'Warning', 'Info', 'Debug', 'Trace'][l.clamp(0, 5)];
