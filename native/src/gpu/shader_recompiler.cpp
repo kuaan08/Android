@@ -207,6 +207,8 @@ ShaderEntry* GpuLayer::getOrCompileShader(const uint8_t* microcode, uint32_t siz
         return nullptr;
     }
 
+    m_shadersCompiled.fetch_add(1, std::memory_order_relaxed);
+    m_shaderBusy.store(false);
     m_shaderCache[hash] = entry;
     LOGI("SHADER: compiled and cached shader 0x%llX", (unsigned long long)hash);
     return &m_shaderCache[hash];
