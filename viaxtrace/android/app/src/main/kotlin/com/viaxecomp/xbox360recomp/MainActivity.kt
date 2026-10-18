@@ -22,6 +22,11 @@ class MainActivity : FlutterActivity() {
     private val engineChannel = "com.viaxecomp.xbox360recomp/engine"
     private val importChannel = "com.viaxecomp.xbox360recomp/import"
     private val isoRequest = 7410
+    private val folderRequest = 7411
+    private val folderPrefs = "xbox360recomp_storage"
+    private var pendingFolderKind: String? = null
+    private var pendingFolderResult: MethodChannel.Result? = null
+    private var importMethodChannel: MethodChannel? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingIsoResult: MethodChannel.Result? = null
 
@@ -39,9 +44,13 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, importChannel).setMethodCallHandler { call, result ->
+        importMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, importChannel)
+        importMethodChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "pickIso" -> openIsoPicker(result)
+                "chooseDirectory" -> chooseDirectory(call.argument<String>("kind"), result)
+                "getDirectory" -> getDirectory(call.argument<String>("kind"), result)
+                "resetDirectory" -> resetDirectory(call.argument<String>("kind"), result)
                 else -> result.notImplemented()
             }
         }
@@ -69,6 +78,10 @@ class MainActivity : FlutterActivity() {
     @Deprecated("Activity result callback is needed for the standalone Android SAF picker.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == folderRequest) {
+            handleFolderResult(resultCode, data)
+            return
+        }
         if (requestCode != isoRequest) return
         val result = pendingIsoResult ?: return
         pendingIsoResult = null
@@ -77,6 +90,7 @@ class MainActivity : FlutterActivity() {
             result.success(null)
             return
         }
+        sendImportProgress("Reading Android document...", 0L, -1L)
         Thread({ copyUriToPrivateStaging(uri, result) }, "x360-saf-iso-import").start()
     }
 
@@ -107,8 +121,11 @@ class MainActivity : FlutterActivity() {
             }
             val staged = File(staging, UUID.randomUUID().toString() + ".iso")
             output = staged
+            sendImportProgress("Copying ISO into app storage...", 0L, expectedSize)
             val digest = MessageDigest.getInstance("SHA-256")
             var total = 0L
+            var lastUpdate = 0L
+            var consecutiveZeroReads = 0
             val buffer = ByteArray(1024 * 1024)
             val source = contentResolver.openInputStream(uri)
                 ?: throw IllegalStateException("Android could not read the selected document")
@@ -117,19 +134,32 @@ class MainActivity : FlutterActivity() {
                     while (true) {
                         val length = input.read(buffer)
                         if (length < 0) break
-                        if (length == 0) continue
+                        if (length == 0) {
+                            consecutiveZeroReads++
+                            if (consecutiveZeroReads > 1000) {
+                                throw IllegalStateException("Android document stopped providing data")
+                            }
+                            continue
+                        }
+                        consecutiveZeroReads = 0
                         if (staging.usableSpace < length + 32L * 1024 * 1024) {
                             throw IllegalStateException("Storage filled while importing ISO")
                         }
                         target.write(buffer, 0, length)
                         digest.update(buffer, 0, length)
                         total += length
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - lastUpdate > 300L) {
+                            sendImportProgress("Copying ISO into app storage...", total, expectedSize)
+                            lastUpdate = now
+                        }
                     }
                 }
             }
             if (total == 0L || (expectedSize >= 0 && total != expectedSize)) {
                 throw IllegalStateException("Incomplete or empty ISO received from Android storage")
             }
+            sendImportProgress("ISO copied; checking integrity...", total, expectedSize)
             val sha = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
             val payload = mapOf("path" to staged.absolutePath, "name" to displayName,
                 "size" to total, "sha256" to sha)
@@ -138,6 +168,95 @@ class MainActivity : FlutterActivity() {
             output?.delete()
             Log.e("Xbox360RecompImport", "SAF ISO copy failed", e)
             mainHandler.post { result.error("ISO_COPY_FAILED", e.message ?: "Cannot import ISO", null) }
+        }
+    }
+
+    private fun sendImportProgress(stage: String, bytes: Long, total: Long) {
+        mainHandler.post {
+            importMethodChannel?.invokeMethod(
+                "importProgress",
+                mapOf("stage" to stage, "bytes" to bytes, "total" to total)
+            )
+        }
+    }
+
+    // SAF folder grants are persisted. The app's native JIT still requires
+    // real private filesystem paths, so these are user-selected import/export
+    // locations and are NOT silently advertised as a JIT data directory.
+    private fun folderKey(kind: String?) =
+        if (kind == "games" || kind == "saves") "saf_" + kind else null
+
+    private fun getDirectory(kind: String?, result: MethodChannel.Result) {
+        val key = folderKey(kind)
+        if (key == null) {
+            result.error("INVALID_FOLDER", "Choose games or saves", null)
+            return
+        }
+        val prefs = getSharedPreferences(folderPrefs, MODE_PRIVATE)
+        result.success(mapOf("uri" to prefs.getString(key, null),
+                            "name" to prefs.getString(key + "_name", null)))
+    }
+
+    private fun resetDirectory(kind: String?, result: MethodChannel.Result) {
+        val key = folderKey(kind)
+        if (key == null) {
+            result.error("INVALID_FOLDER", "Choose games or saves", null)
+            return
+        }
+        val prefs = getSharedPreferences(folderPrefs, MODE_PRIVATE)
+        prefs.edit().remove(key).remove(key + "_name").apply()
+        result.success(null)
+    }
+
+    private fun chooseDirectory(kind: String?, result: MethodChannel.Result) {
+        if (folderKey(kind) == null) {
+            result.error("INVALID_FOLDER", "Choose games or saves", null)
+            return
+        }
+        if (pendingFolderResult != null) {
+            result.error("PICKER_BUSY", "Another directory picker is open", null)
+            return
+        }
+        pendingFolderResult = result
+        pendingFolderKind = kind
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                         Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+            startActivityForResult(intent, folderRequest)
+        } catch (e: Exception) {
+            pendingFolderKind = null
+            pendingFolderResult = null
+            result.error("PICKER_UNAVAILABLE", e.message ?: "Cannot choose folder", null)
+        }
+    }
+
+    private fun handleFolderResult(resultCode: Int, data: Intent?) {
+        val result = pendingFolderResult ?: return
+        val kind = pendingFolderKind
+        pendingFolderResult = null
+        pendingFolderKind = null
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            result.success(null)
+            return
+        }
+        val uri = data.data!!
+        try {
+            val flags = (data.flags and
+                (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
+            contentResolver.takePersistableUriPermission(uri, flags)
+            val key = folderKey(kind)!!
+            val label = uri.lastPathSegment ?: "Selected directory"
+            getSharedPreferences(folderPrefs, MODE_PRIVATE).edit()
+                .putString(key, uri.toString())
+                .putString(key + "_name", label)
+                .apply()
+            result.success(mapOf("uri" to uri.toString(), "name" to label))
+        } catch (e: Exception) {
+            result.error("FOLDER_PERMISSION_FAILED",
+                e.message ?: "Cannot retain access to this directory", null)
         }
     }
 
