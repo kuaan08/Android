@@ -100,6 +100,8 @@ jobs:
         run: flutter pub get
       - name: Generate Riverpod / Freezed / Hive sources
         run: dart run build_runner build --delete-conflicting-outputs
+      - name: Verify diagnostic UI states
+        run: flutter test test/gpu_diagnostics_test.dart
       - name: Flutter analyzer
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
       - name: Compile debug Android ARM64 APK

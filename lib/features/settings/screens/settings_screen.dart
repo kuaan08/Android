@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../core/theme/app_theme.dart';
@@ -29,6 +30,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _loadInfo();
     _loadDirectories();
+    _loadPreferences();
+  }
+
+  Future<void> _loadPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _fpsOverlay = prefs.getBool('global_overlay') ?? true);
+  }
+
+  Future<void> _setFpsOverlay(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('global_overlay', value);
+    if (mounted) setState(() => _fpsOverlay = value);
   }
 
   Future<void> _loadInfo() async {
@@ -112,7 +126,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         title: 'FPS Overlay',
                         subtitle: 'Show frame rate during gameplay',
                         value: _fpsOverlay,
-                        onChanged: (v) => setState(() => _fpsOverlay = v),
+                        onChanged: _setFpsOverlay,
                       ),
                       const _Divider(),
                       _SwitchTile(
@@ -121,6 +135,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         subtitle: 'Dark icons in the status bar',
                         value: _darkStatusBar,
                         onChanged: (v) => setState(() => _darkStatusBar = v),
+                      ),
+                    ]),
+                    const SizedBox(height: 16),
+
+                    // ─── GPU STATUS ──────────────────────────────────
+                    _SectionLabel('GPU / shader diagnostics'),
+                    _SettingsCard(children: [
+                      _SelectTile(
+                        icon: Icons.monitor_heart_outlined,
+                        title: 'Black-screen diagnostics',
+                        subtitle: 'Real Vulkan frames, PM4 commands, JIT and shaders are shown during Play.',
+                        onTap: () => showDialog(
+                          context: context,
+                          builder: (_) => AlertDialog(
+                            title: const Text('About the black screen'),
+                            content: const Text(
+                              '0 FPS means no Vulkan frames were presented. '
+                              'The current Xbox 360 PM4 draw execution and '
+                              'Xenos shader translation are not complete. '
+                              'The in-game overlay can copy real diagnostic '
+                              'counters so we can investigate precisely.'),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(context),
+                                child: const Text('OK')),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const _Divider(),
+                      _SelectTile(
+                        icon: Icons.memory_rounded,
+                        title: 'Active Vulkan driver',
+                        subtitle: 'Android system driver. Turnip selection is not wired yet.',
+                        onTap: () => showDialog(
+                          context: context,
+                          builder: (_) => AlertDialog(
+                            title: const Text('Turnip driver support'),
+                            content: const Text(
+                              'The current native Vulkan backend still links '
+                              'to Android system Vulkan. Turnip requires '
+                              'libadrenotools and a proper Vulkan function '
+                              'dispatcher. A driver ZIP or a separate driver '
+                              'app will not activate Turnip by itself.'),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(context),
+                                child: const Text('OK')),
+                            ],
+                          ),
+                        ),
                       ),
                     ]),
                     const SizedBox(height: 16),

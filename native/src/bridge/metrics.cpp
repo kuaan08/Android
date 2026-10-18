@@ -7,6 +7,7 @@
 #include "../../include/gpu/gpu_layer.h"
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <cstdlib>
 #include <android/log.h>
 #include <sys/resource.h>
@@ -91,16 +92,38 @@ int64_t x360_metrics_instructions_executed() {
     return x360::bridge::getInstructionsExecuted();
 }
 
+// FPS is actual Vulkan present rate, not arbitrary JIT loop iteration count.
 float x360_metrics_fps() {
-    return (float)g_jitEngine.currentFps();
+    return g_gpuLayer.framesPresented() ? g_gpuLayer.currentFps() : 0.0f;
 }
 
 float x360_metrics_frame_time() {
-    return (float)g_jitEngine.frameTimeMs();
+    const float fps = x360_metrics_fps();
+    return fps > 0.0f ? 1000.0f / fps : 0.0f;
 }
 
 int64_t x360_metrics_ram() {
     return x360::bridge::getRamUsage();
+}
+
+int32_t x360_metrics_gpu_state() { return g_gpuLayer.rendererStatus(); }
+int32_t x360_metrics_jit_state() { return static_cast<int32_t>(g_jitEngine.state()); }
+int64_t x360_metrics_gpu_frames() { return static_cast<int64_t>(g_gpuLayer.framesPresented()); }
+int64_t x360_metrics_pm4_packets() { return static_cast<int64_t>(g_gpuLayer.pm4PacketsSeen()); }
+int64_t x360_metrics_pm4_draw_attempts() { return static_cast<int64_t>(g_gpuLayer.pm4DrawCallsSeen()); }
+int64_t x360_metrics_shader_attempts() { return static_cast<int64_t>(g_gpuLayer.shadersRequested()); }
+int64_t x360_metrics_shader_compiled() { return static_cast<int64_t>(g_gpuLayer.shadersCompiled()); }
+int64_t x360_metrics_shader_failed() { return static_cast<int64_t>(g_gpuLayer.shadersFailed()); }
+int32_t x360_metrics_shader_busy() { return g_gpuLayer.shaderCompiling() ? 1 : 0; }
+
+int32_t x360_metrics_gpu_name(char* out, int32_t capacity) {
+    if (!out || capacity <= 0) return -1;
+    auto name = g_gpuLayer.gpuName();
+    if (name.empty()) name = "Vulkan GPU not initialized";
+    const size_t count = std::min(name.size(), static_cast<size_t>(capacity-1));
+    std::memcpy(out, name.data(), count);
+    out[count] = '\0';
+    return static_cast<int32_t>(count);
 }
 
 } // extern "C"

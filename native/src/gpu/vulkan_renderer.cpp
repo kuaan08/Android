@@ -35,20 +35,22 @@ GpuLayer::~GpuLayer() {
 }
 
 bool GpuLayer::init(ANativeWindow* window, uint8_t* guestMemory, uint64_t guestBase) {
+    m_rendererStatus.store(1);
     m_window      = window;
     m_guestMemory = guestMemory;
     m_guestBase   = guestBase;
 
-    if (!createInstance())       { LOGE("createInstance failed");      return false; }
-    if (!selectPhysicalDevice()) { LOGE("selectPhysicalDevice failed");return false; }
-    if (!createLogicalDevice())  { LOGE("createLogicalDevice failed"); return false; }
-    if (!createSwapchain(window)){ LOGE("createSwapchain failed");     return false; }
-    if (!createRenderPass())     { LOGE("createRenderPass failed");    return false; }
-    if (!createFramebuffers())   { LOGE("createFramebuffers failed");  return false; }
-    if (!createCommandPool())    { LOGE("createCommandPool failed");   return false; }
-    if (!createSyncObjects())    { LOGE("createSyncObjects failed");   return false; }
+    if (!createInstance()) { LOGE("createInstance failed"); m_rendererStatus.store(3); return false; }
+    if (!selectPhysicalDevice()) { LOGE("selectPhysicalDevice failed"); m_rendererStatus.store(3); return false; }
+    if (!createLogicalDevice()) { LOGE("createLogicalDevice failed"); m_rendererStatus.store(3); return false; }
+    if (!createSwapchain(window)) { LOGE("createSwapchain failed"); m_rendererStatus.store(3); return false; }
+    if (!createRenderPass()) { LOGE("createRenderPass failed"); m_rendererStatus.store(3); return false; }
+    if (!createFramebuffers()) { LOGE("createFramebuffers failed"); m_rendererStatus.store(3); return false; }
+    if (!createCommandPool()) { LOGE("createCommandPool failed"); m_rendererStatus.store(3); return false; }
+    if (!createSyncObjects()) { LOGE("createSyncObjects failed"); m_rendererStatus.store(3); return false; }
 
     m_initialized = true;
+    m_rendererStatus.store(2);
     LOGI("Vulkan renderer initialized (%ux%u)", m_swapExtent.width, m_swapExtent.height);
     return true;
 }
@@ -90,6 +92,10 @@ bool GpuLayer::selectPhysicalDevice() {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(dev, &props);
         LOGI("GPU: %s", props.deviceName);
+        {
+            std::lock_guard<std::mutex> guard(m_gpuNameMutex);
+            m_gpuName = props.deviceName;
+        }
         m_physDevice = dev; // Take the first (usually only one on Android)
         break;
     }
@@ -120,8 +126,10 @@ bool GpuLayer::createLogicalDevice() {
 
     const char* devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
+    VkPhysicalDeviceFeatures supportedFeatures{};
+    vkGetPhysicalDeviceFeatures(m_physDevice, &supportedFeatures);
     VkPhysicalDeviceFeatures features{};
-    features.samplerAnisotropy = VK_TRUE;
+    features.samplerAnisotropy = supportedFeatures.samplerAnisotropy;
 
     VkDeviceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -155,7 +163,12 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
 
     // Find surface format (prefer BGRA8_SRGB)
     uint32_t fmtCount = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface, &fmtCount, nullptr);
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface,
+                                               &fmtCount, nullptr) != VK_SUCCESS ||
+        fmtCount == 0) {
+        LOGE("No Android Vulkan surface formats available");
+        return false;
+    }
     std::vector<VkSurfaceFormatKHR> formats(fmtCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface, &fmtCount, formats.data());
 
@@ -168,6 +181,7 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
         }
     }
 
+    m_swapFormat = chosenFormat.format;
     uint32_t imageCount = std::max(2u, caps.minImageCount);
     if (caps.maxImageCount > 0) imageCount = std::min(imageCount, caps.maxImageCount);
 
@@ -182,7 +196,10 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
     swci.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     swci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swci.preTransform     = caps.currentTransform;
-    swci.compositeAlpha   = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    swci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+        ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+        : static_cast<VkCompositeAlphaFlagBitsKHR>(
+              caps.supportedCompositeAlpha & (~caps.supportedCompositeAlpha + 1));
     swci.presentMode      = VK_PRESENT_MODE_FIFO_KHR; // VSync
     swci.clipped          = VK_TRUE;
 
@@ -214,7 +231,7 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
 
 bool GpuLayer::createRenderPass() {
     VkAttachmentDescription colorAttach{};
-    colorAttach.format         = VK_FORMAT_B8G8R8A8_SRGB;
+    colorAttach.format         = m_swapFormat;
     colorAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
     colorAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
@@ -346,7 +363,13 @@ void GpuLayer::presentFrame() {
     present.swapchainCount     = 1;
     present.pSwapchains        = &m_swapchain;
     present.pImageIndices      = &imgIdx;
-    vkQueuePresentKHR(m_graphicsQueue, &present);
+    const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &present);
+    if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR) {
+        m_presentedFrames.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        LOGE("vkQueuePresentKHR failed: %d", static_cast<int>(presentResult));
+        return;
+    }
 
     // FPS tracking
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();

@@ -37,6 +37,7 @@ class _MetricsOverlayState extends State<MetricsOverlay> {
   @override
   Widget build(BuildContext context) {
     return Container(
+      constraints: const BoxConstraints(maxWidth: 310),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
         color: Colors.black.withAlpha(160),
@@ -59,8 +60,21 @@ class _MetricsOverlayState extends State<MetricsOverlay> {
           _MetricRow(label: 'RAM', value: '${(_metrics.ramUsageBytes / 1024 / 1024).toStringAsFixed(0)}MB'),
           if (_metrics.gpuTempCelsius > 0)
             _MetricRow(label: 'GPU', value: '${_metrics.gpuTempCelsius.toStringAsFixed(0)}°C'),
-          if (_metrics.jitBlocksCompiled > 0)
-            _MetricRow(label: 'JIT', value: '${_metrics.jitBlocksCompiled}blk'),
+          _MetricRow(label: 'JIT', value: '${_metrics.jitBlocksCompiled} blocks / state ${_metrics.jitState}'),
+          _MetricRow(label: 'VK', value: _metrics.gpuState == 2 ? 'Ready' : _metrics.gpuState == 3 ? 'Failed' : 'Not ready'),
+          _MetricRow(label: 'Frames', value: '${_metrics.framesPresented} presented'),
+          _MetricRow(label: 'PM4', value: '${_metrics.pm4Packets} packets / ${_metrics.pm4DrawAttempts} draw requests'),
+          _MetricRow(label: 'Shader', value: '${_metrics.shaderCompiled}/${_metrics.shaderAttempts} modules, ${_metrics.shaderFailed} failed'),
+          if (_metrics.shaderBusy)
+            const Text('Compiling a Vulkan shader module...',
+                style: TextStyle(fontSize: 10, color: Colors.amber)),
+          const SizedBox(height: 3),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 290),
+            child: Text(_metrics.gpuName,
+                maxLines: 2, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 9, color: Colors.white54)),
+          ),
         ],
       ),
     );

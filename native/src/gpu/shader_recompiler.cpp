@@ -180,6 +180,8 @@ ShaderEntry* GpuLayer::getOrCompileShader(const uint8_t* microcode, uint32_t siz
 
     auto it = m_shaderCache.find(hash);
     if (it != m_shaderCache.end()) return &it->second;
+    m_shadersRequested.fetch_add(1, std::memory_order_relaxed);
+    m_shaderBusy.store(true);
 
     ShaderEntry entry{};
     entry.microCodeHash = hash;
@@ -187,6 +189,8 @@ ShaderEntry* GpuLayer::getOrCompileShader(const uint8_t* microcode, uint32_t siz
 
     if (!decompileMicrocode(microcode, size, isVertex, entry.spirv)) {
         LOGE("SHADER: decompile failed");
+        m_shadersFailed.fetch_add(1, std::memory_order_relaxed);
+        m_shaderBusy.store(false);
         return nullptr;
     }
 
@@ -198,9 +202,13 @@ ShaderEntry* GpuLayer::getOrCompileShader(const uint8_t* microcode, uint32_t siz
 
     if (vkCreateShaderModule(m_device, &smci, nullptr, &entry.vkModule) != VK_SUCCESS) {
         LOGE("SHADER: vkCreateShaderModule failed");
+        m_shadersFailed.fetch_add(1, std::memory_order_relaxed);
+        m_shaderBusy.store(false);
         return nullptr;
     }
 
+    m_shadersCompiled.fetch_add(1, std::memory_order_relaxed);
+    m_shaderBusy.store(false);
     m_shaderCache[hash] = entry;
     LOGI("SHADER: compiled and cached shader 0x%llX", (unsigned long long)hash);
     return &m_shaderCache[hash];

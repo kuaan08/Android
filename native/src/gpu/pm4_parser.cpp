@@ -36,6 +36,7 @@ static inline uint32_t pm4Type0Count(uint32_t header) {
 void GpuLayer::processPm4RingBuffer(const uint32_t* ringBuf, uint32_t sizeWords) {
     uint32_t i = 0;
     while (i < sizeWords) {
+        m_pm4Packets.fetch_add(1, std::memory_order_relaxed);
         uint32_t header = __builtin_bswap32(ringBuf[i]);
         Pm4PacketType type = pm4Type(header);
 
@@ -138,6 +139,7 @@ void GpuLayer::handleDrawIndx(const uint32_t* params, uint32_t count) {
     uint32_t vtxCount  = __builtin_bswap32(params[0]);
     uint32_t initiator = (count >= 2) ? __builtin_bswap32(params[1]) : 0;
 
+    m_drawAttempts.fetch_add(1, std::memory_order_relaxed);
     LOGI("PM4: DRAW_INDX vtxCount=%u initiator=0x%X", vtxCount, initiator);
 
     // In a full implementation:
