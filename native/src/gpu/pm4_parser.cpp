@@ -139,6 +139,7 @@ void GpuLayer::handleDrawIndx(const uint32_t* params, uint32_t count) {
     uint32_t vtxCount  = __builtin_bswap32(params[0]);
     uint32_t initiator = (count >= 2) ? __builtin_bswap32(params[1]) : 0;
 
+    m_drawAttempts.fetch_add(1, std::memory_order_relaxed);
     LOGI("PM4: DRAW_INDX vtxCount=%u initiator=0x%X", vtxCount, initiator);
 
     // In a full implementation:
