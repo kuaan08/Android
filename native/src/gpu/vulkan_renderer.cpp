@@ -126,8 +126,10 @@ bool GpuLayer::createLogicalDevice() {
 
     const char* devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
+    VkPhysicalDeviceFeatures supportedFeatures{};
+    vkGetPhysicalDeviceFeatures(m_physDevice, &supportedFeatures);
     VkPhysicalDeviceFeatures features{};
-    features.samplerAnisotropy = VK_TRUE;
+    features.samplerAnisotropy = supportedFeatures.samplerAnisotropy;
 
     VkDeviceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -161,7 +163,12 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
 
     // Find surface format (prefer BGRA8_SRGB)
     uint32_t fmtCount = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface, &fmtCount, nullptr);
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface,
+                                               &fmtCount, nullptr) != VK_SUCCESS ||
+        fmtCount == 0) {
+        LOGE("No Android Vulkan surface formats available");
+        return false;
+    }
     std::vector<VkSurfaceFormatKHR> formats(fmtCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_physDevice, m_surface, &fmtCount, formats.data());
 
@@ -174,6 +181,7 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
         }
     }
 
+    m_swapFormat = chosenFormat.format;
     uint32_t imageCount = std::max(2u, caps.minImageCount);
     if (caps.maxImageCount > 0) imageCount = std::min(imageCount, caps.maxImageCount);
 
@@ -188,7 +196,10 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
     swci.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     swci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swci.preTransform     = caps.currentTransform;
-    swci.compositeAlpha   = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    swci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+        ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+        : static_cast<VkCompositeAlphaFlagBitsKHR>(
+              caps.supportedCompositeAlpha & (~caps.supportedCompositeAlpha + 1));
     swci.presentMode      = VK_PRESENT_MODE_FIFO_KHR; // VSync
     swci.clipped          = VK_TRUE;
 
@@ -220,7 +231,7 @@ bool GpuLayer::createSwapchain(ANativeWindow* window) {
 
 bool GpuLayer::createRenderPass() {
     VkAttachmentDescription colorAttach{};
-    colorAttach.format         = VK_FORMAT_B8G8R8A8_SRGB;
+    colorAttach.format         = m_swapFormat;
     colorAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
     colorAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
