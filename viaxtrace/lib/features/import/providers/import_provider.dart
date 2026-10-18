@@ -2,10 +2,8 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
-import 'package:uuid/uuid.dart';
 
 import '../../../core/models/game_entry.dart';
-import '../../../core/native/engine_bridge.dart';
 
 class ImportState {
   final bool isImporting;
@@ -36,77 +34,162 @@ class ImportState {
 
 final importProvider = NotifierProvider<ImportNotifier, ImportState>(ImportNotifier.new);
 
+/// Import metadata only. Do NOT initialize the 4 GiB guest JIT or parse
+/// untrusted executables in the UI process while adding a game to the library.
 class ImportNotifier extends Notifier<ImportState> {
   @override
   ImportState build() => const ImportState();
 
-  Future<GameEntry?> importGame(String sourcePath, GameFormat format) async {
-    state = const ImportState(isImporting: true, currentStep: 'Analyzing file...', progress: 0.05);
-
+  Future<GameEntry?> importGame(String sourcePath, GameFormat format, {
+    String? originalName,
+    String? precomputedSha256,
+    int? knownSize,
+    bool ownedStagingFile = false,
+  }) async {
+    state = const ImportState(
+      isImporting: true, currentStep: 'Validating selected file...', progress: 0.10);
+    final file = File(sourcePath);
+    File? installedFile;
+    Directory? createdDirectory;
     try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final gamesDir = Directory('${appDir.path}/games');
-      await gamesDir.create(recursive: true);
-
-      state = state.copyWith(currentStep: 'Validating integrity...', progress: 0.15);
-      await Future.delayed(const Duration(milliseconds: 200));
-
-      // Compute file hash for dedup
-      final file = File(sourcePath);
-      final bytes = await file.readAsBytes();
-      final hash = sha256.convert(bytes).toString().substring(0, 16);
-
-      state = state.copyWith(currentStep: 'Parsing executable...', progress: 0.30);
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      // Parse game metadata via native engine (stub if unavailable)
-      String titleId = 'UNKNOWN_${hash.toUpperCase()}';
-      String title = 'Unknown Game';
-      String region = 'NTSC-U';
-
-      if (EngineBridge.isAvailable) {
-        final rc = switch (format) {
-          GameFormat.xex => EngineBridge.loadXex(sourcePath),
-          GameFormat.iso => EngineBridge.loadIso(sourcePath),
-          GameFormat.stfs => EngineBridge.loadStfs(sourcePath),
-          _ => -1,
-        };
-        if (rc != 0) throw Exception('Native loader returned error code $rc');
-      } else {
-        // Stub: parse title from filename
-        title = file.uri.pathSegments.last.replaceAll(RegExp(r'\.[^.]+$'), '');
-        titleId = 'STUB_${hash.toUpperCase().substring(0, 8)}';
+      if (!await file.exists()) throw const FileSystemException('The selected file is not readable');
+      final size = await file.length();
+      if (size == 0) throw const FormatException('The selected game file is empty');
+      if (knownSize != null && knownSize != size) {
+        throw const FormatException('Android provided an incomplete file');
       }
 
-      state = state.copyWith(currentStep: 'Copying files...', progress: 0.55);
+      switch (format) {
+        case GameFormat.iso:
+          await _validateIso(file, size);
+          break;
+        case GameFormat.xex:
+          await _validateMagic(file, const [0x58, 0x45, 0x58, 0x32], 'Not a valid XEX2 executable');
+          break;
+        case GameFormat.stfs:
+          await _validateStfs(file);
+          break;
+        case GameFormat.unknown:
+          throw const FormatException('Unsupported game format');
+      }
 
-      final installDir = '${gamesDir.path}/$titleId';
-      await Directory(installDir).create(recursive: true);
+      state = state.copyWith(currentStep: 'Identifying file...', progress: 0.30);
+      // Never call readAsBytes() here: an Xbox 360 disc image can be several GiB.
+      final hash = (precomputedSha256 != null &&
+              RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(precomputedSha256))
+          ? precomputedSha256.toLowerCase()
+          : (await sha256.bind(file.openRead()).first).toString();
+      final titleId = 'IMPORT_' + hash.substring(0, 16).toUpperCase();
 
-      // Copy source file to install dir
-      final destPath = '$installDir/${file.uri.pathSegments.last}';
-      await file.copy(destPath);
+      final rawName = originalName ?? file.uri.pathSegments.last;
+      final safeName = rawName.replaceAll(RegExp(r'[^A-Za-z0-9._ -]'), '_');
+      final title = safeName.replaceFirst(RegExp(r'\.[^.]+$'), '');
+      if (safeName.isEmpty || safeName == '.' || safeName == '..') {
+        throw const FormatException('Invalid selected filename');
+      }
 
-      state = state.copyWith(currentStep: 'Finalizing installation...', progress: 0.90);
-      await Future.delayed(const Duration(milliseconds: 200));
+      final appDir = await getApplicationDocumentsDirectory();
+      final gamesDir = Directory(appDir.path + '/games');
+      await gamesDir.create(recursive: true);
+      createdDirectory = Directory(gamesDir.path + '/' + titleId);
+      if (await createdDirectory.exists()) {
+        throw const FileSystemException('This file is already imported');
+      }
+      await createdDirectory.create();
+      installedFile = File(createdDirectory.path + '/' + safeName);
+      state = state.copyWith(
+        currentStep: 'Saving game to library...', progress: 0.65,
+        details: 'Streaming or moving file without loading it into RAM');
 
-      final entry = GameEntry(
+      if (ownedStagingFile) {
+        try {
+          await file.rename(installedFile.path);
+        } on FileSystemException {
+          // Fallback for separate filesystems; still streams through dart:io.
+          await file.copy(installedFile.path);
+          await file.delete();
+        }
+      } else {
+        await file.copy(installedFile.path);
+      }
+
+      state = const ImportState(
+        isImporting: false, currentStep: 'Imported (runtime not yet validated)',
+        progress: 1.0);
+      return GameEntry(
         titleId: titleId,
-        title: title,
-        region: region,
-        execPath: destPath,
-        installDir: installDir,
+        title: title.isEmpty ? 'Xbox 360 Game' : title,
+        region: 'Unknown',
+        execPath: installedFile.path,
+        installDir: createdDirectory.path,
         format: format,
         compatStatus: CompatStatus.untested,
-        installSizeBytes: bytes.length,
+        installSizeBytes: size,
         installedAt: DateTime.now().toIso8601String(),
       );
-
-      state = const ImportState(isImporting: false, progress: 1.0);
-      return entry;
-    } catch (e) {
-      state = ImportState(isImporting: false, error: e.toString());
+    } catch (error) {
+      // Only remove paths this operation created, never a previous game.
+      if (installedFile != null && await installedFile.exists()) {
+        await installedFile.delete();
+      }
+      if (createdDirectory != null && await createdDirectory.exists()) {
+        final contents = await createdDirectory.list().toList();
+        if (contents.isEmpty) await createdDirectory.delete();
+      }
+      state = ImportState(isImporting: false, error: error.toString());
       return null;
+    } finally {
+      if (ownedStagingFile && await file.exists()) {
+        try { await file.delete(); } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> _validateMagic(File file, List<int> expected, String error) async {
+    final handle = await file.open();
+    try {
+      final magic = await handle.read(expected.length);
+      if (magic.length != expected.length) throw FormatException(error);
+      for (var i = 0; i < expected.length; i++) {
+        if (magic[i] != expected[i]) throw FormatException(error);
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  Future<void> _validateStfs(File file) async {
+    final handle = await file.open();
+    try {
+      final magic = String.fromCharCodes(await handle.read(4));
+      if (magic != 'CON ' && magic != 'LIVE' && magic != 'PIRS') {
+        throw const FormatException('Not a CON, LIVE, or PIRS package');
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  Future<void> _validateIso(File file, int size) async {
+    final handle = await file.open();
+    try {
+      const xboxMagic = 'MICROSOFT*XBOX*MEDIA';
+      for (final base in const [0, 34078720, 265879552, 405798912]) {
+        final offset = base + 32 * 2048;
+        if (size < offset + 2048) continue;
+        await handle.setPosition(offset);
+        final header = await handle.read(20);
+        if (String.fromCharCodes(header) == xboxMagic) return;
+      }
+      if (size >= 17 * 2048) {
+        await handle.setPosition(16 * 2048 + 1);
+        if (String.fromCharCodes(await handle.read(5)) == 'CD001') return;
+      }
+      throw const FormatException(
+        'No valid Xbox XDVDFS or ISO 9660 volume header found. '
+        'Use a supported ISO/XISO dump.');
+    } finally {
+      await handle.close();
     }
   }
 }
